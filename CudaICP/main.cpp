@@ -1,4 +1,3 @@
-//#include <stdio.h>
 #include <fstream>
 #include <iostream> //Only for printig Eigen stuff
 #include <sstream>
@@ -8,20 +7,23 @@
 #include <Eigen/Geometry>
 #include <cuda_runtime.h>
 
-
 #include "kernel.h"
 
 #define ROW 3 //dimension for each point
 #define COL 217088 //Number of points
 
-void readFiles(float *valse, float *balse);
-void readFile(float *data, std::string name);
-void writeFile(float *valse, int i);
-void writeFile2(float *valse, float*balse, int *indices);
-Eigen::Matrix3f rot_from_RPY(Eigen::Vector3f rpy);
-Eigen::Vector3f RPY_from_rot(Eigen::Matrix3f rot);
+void readFile(float *data, std::string name); //Read file named "name" to "float *data"
+void writeFile(float *data, int i); //Write "float *data" to file named "outcloud" + i + ".txt
+void writeFile2(float *valse, float*balse, int *indices); //Write corresponding points indicated by "int *indices" to file
+Eigen::Matrix3f rot_from_RPY(Eigen::Vector3f rpy); //Calculate rotation matric from roll-pitch-yaw angles
+Eigen::Vector3f RPY_from_rot(Eigen::Matrix3f rot); //Calculate roll-pitch-yaw angles from rotation matrix
 
 int main() {
+	int icp_iteratons = 100; //Number of ICP iterations
+	int dataset_start = 30; //Dataset start number. Format: "name" + number + ".txt"
+	int dataset_stop = 31; //Dataset stop number. Format: "name" + number + ".txt"
+
+
 	long startTime;
 	long endTime;
 	float *model = new float[ROW*COL];
@@ -34,22 +36,25 @@ int main() {
 	Eigen::MatrixXf Temp = Eigen::MatrixXf::Zero(ROW + 1, COL);
 	Eigen::Matrix4f accuICPTrans = Eigen::Matrix4f::Identity();
 	Eigen::Matrix4f absTrans = Eigen::Matrix4f::Identity();
-	bool overshoot = false;
 
-	outfile.open("performance.txt");
-	transfile.open("transforms.txt");
+	outfile.open("performance.txt"); //File for storing perfromance of ICP
+	transfile.open("transforms.txt"); //File for storing found transforms
 
-	name = "Cloud_uncompressed" + std::to_string(30) + ".txt";
-	readFile(model, name);
-	for (int i = 31; i < 32; i++) {
+	name = "Cloud_uncompressed" + std::to_string(dataset_start) + ".txt";
+	readFile(model, name); //Read file to "model"
+
+	//Start registration
+	for (int i = dataset_start+1; i < dataset_stop+1; i++) {
+		//Previous model becomes target
 		float *temp = target;
 		target = model;
 		model = temp;
+
+		//Read new model data
 		name = "Cloud_uncompressed" + std::to_string(i) + ".txt";
-		readFile(model, name);
+		readFile(model, name); //Read file to "model"
 
-
-
+		//Store data in Eigen matrix
 		for (int j = 0; j < COL; j++) {
 			Temp(0, j) = model[j * 3 + 0];
 			Temp(1, j) = model[j * 3 + 1];
@@ -57,17 +62,15 @@ int main() {
 			Temp(3, j) = 1;
 		}
 
-		//transform to current pose
+		//Transform to current pose..
 		Temp = absTrans*Temp;
 
-		//Update point cloud
+		//..and update model data
 		for (int j = 0; j < COL; j++) {
 			model[j * 3 + 0] = Temp(0, j);
 			model[j * 3 + 1] = Temp(1, j);
 			model[j * 3 + 2] = Temp(2, j);
 		}
-
-		//iterate ICP several times
 
 		//Compute normals
 		startTime = clock();
@@ -75,31 +78,16 @@ int main() {
 		endTime = clock();
 		printf("Normal computation tool: %ld ms \n", endTime - startTime);
 
-		for (int q = 0; q < 100; q++) {
+		//iterate ICP several times
+		for (int q = 0; q < icp_iteratons; q++) {
 			int corr = 0;
 
-			//Find NN
-			startTime = clock();
-			float executiontime = run_procedure(model, target, cpu_ptrclosest);
-			endTime = clock();
-			//printf("GPU time: %ld ms\n", endTime - startTime);
-			//printf("Actual time: %f ms\n", executiontime);
-			//printf("iteration number %i\n", q + 1);
+			//Find NN on GPU
+			float executiontime = run_procedure(model, target, cpu_ptrclosest);			
 
 			//Calculate ICP transfrom from NN
-			//Eigen::Matrix4f trans = icpBruteCPU(model, target, cpu_ptrclosest);
-			Eigen::Matrix4f trans = icpPTPCPU(model, target, normals, cpu_ptrclosest);
-
-			//Test overshooting transform
-			if (overshoot) {
-				Eigen::Vector3f EA = RPY_from_rot(trans.block<3, 3>(0, 0))*1.6;
-				Eigen::Matrix3f Rot = rot_from_RPY(EA);
-				std::cout << EA << std::endl;
-				std::cout << Rot << std::endl;
-				std::cout << trans.block<3, 3>(0, 0) << std::endl;
-				trans.block<3, 3>(0, 0) = Rot;
-				trans.block<3, 1>(0, 3) = trans.block<3, 1>(0, 3)*1.6;
-			}
+			//Eigen::Matrix4f trans = icpBruteCPU(model, target, cpu_ptrclosest); //Point-to-Point ICP
+			Eigen::Matrix4f trans = icpPTPCPU(model, target, normals, cpu_ptrclosest); //Point-to-Plane ICP
 
 			//Update accumulated transformation
 			accuICPTrans = trans*accuICPTrans;
@@ -112,8 +100,8 @@ int main() {
 				model[j * 3 + 2] = Temp(2, j);
 			}
 
-			float rms_err = 0;
-			//Calculate ICP-RMS error
+			//Calculate ICP-RMS error and count the number of correspondences
+			float rms_err = 0;			
 			for (int j = 0; j < COL; j++) {
 				if (cpu_ptrclosest[j] != -1) {
 					rms_err += (model[j * 3 + 0] - target[cpu_ptrclosest[j] * 3 + 0])*(model[j * 3 + 0] - target[cpu_ptrclosest[j] * 3 + 0]) +
@@ -123,23 +111,22 @@ int main() {
 				}
 			}
 			rms_err = sqrt(rms_err) / corr;
-			//printf("Error: %f\n Correspondenses: %i\n", rms_err,corr);
+
 			//Write Performance to file
 			outfile << RPY_from_rot(accuICPTrans.block<3, 3>(0, 0)).transpose() << " " << accuICPTrans.block<3, 1>(0, 3).transpose() << " " << corr << " " << rms_err << " " << executiontime << "\n";
 		}
+
+		//update transformation and write to file
 		absTrans = accuICPTrans*absTrans;
 		transfile << absTrans << "\n";
-		printf("%i\n", i);
-		std::cout << absTrans << std::endl;
-		accuICPTrans = Eigen::Matrix4f::Identity();
-		
 
+		//reset interframe transfomration
+		accuICPTrans = Eigen::Matrix4f::Identity();
 	}
+
+	//Close and terminate
 	transfile.close();
-	outfile.close();
-	//writeFile(valse, 4); //Cloud1 transformed = output4.txt
-	//writeFile2(valse, balse, cpu_ptrclosest); //write correspondenses
-	
+	outfile.close();	
 	delete[] normals; normals = nullptr;
 	delete[] model; model = nullptr;
 	delete[] target; target = nullptr;
@@ -216,50 +203,6 @@ void writeFile(float *valse, int num) {
 	}
 
 	outfile.close();
-}
-
-void readFiles(float *valse, float *balse) { //[ROW*COL], float balse[ROW*COL]) {
-	std::fstream in;
-	in.open("Cloud1.txt");
-	if (in.fail()) {
-		printf("error loading .txt file reading\n");
-		return;
-	}
-	std::string line;
-	std::string value;
-	int i = 0;
-	while (std::getline(in, line)) {
-		std::stringstream ss(line);
-		while (ss >> value) {
-			if (value == "-inf") {
-				valse[i] = -std::numeric_limits<float>::infinity();
-			}
-			else {
-				valse[i] = std::stof(value);
-			}
-			i++;
-		}
-	}
-	in.close();
-	in.open("Cloud2.txt");
-	if (in.fail()) {
-		printf("error loading .txt file reading\n");
-		return;
-	}
-	i = 0;
-	while (std::getline(in, line)) {
-		std::stringstream sss(line);
-		while (sss >> value) {
-			if (value == "-inf") {
-				balse[i] = -std::numeric_limits<float>::infinity();
-			}
-			else {
-				balse[i] = std::stof(value);
-			}
-			i++;
-		}
-	}
-	in.close();
 }
 
 void readFile(float *data, std::string name) {
