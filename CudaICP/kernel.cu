@@ -118,7 +118,7 @@ __global__ void edgeDetect(float *pts, int *indices, int num_regions) {// int *e
 				}
 				prev_mean = (this_point + (n - 1)*prev_mean) / n;
 			}
-		}//Need to iterate through all points 1 for finding the varianc
+		}//Need to iterate through all points 1 for finding the variance
 		//and 1 for setting if a point is on an edge or not
 		for (int i = 0; i < 4; i++) {
 			for (int j = 0; j < 4; j++) {
