@@ -76,7 +76,7 @@ int main() {
 		startTime = clock();
 		comp_normal(target,normals);
 		endTime = clock();
-		printf("Normal computation tool: %ld ms \n", endTime - startTime);
+		printf("Normal computation took: %ld ms \n", endTime - startTime);
 
 		//iterate ICP several times
 		for (int q = 0; q < icp_iteratons; q++) {

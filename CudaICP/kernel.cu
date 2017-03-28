@@ -16,6 +16,7 @@ __device__ const int blockSize = 512;
 
 int threads = blockSize;
 
+//This Kernel finds NN by exploiting the structure of the point cloud
 __global__ void kernelNNStructured
 (float *pts1, float*pts2, float *distances, int *closest, int area) {
 	// This implementation exploits the matrix structure of a depth image from a 3D camera and perfroms a limited NN search for each point. 
@@ -53,6 +54,7 @@ __global__ void kernelNNStructured
 	}
 }
 
+//This kernel finds the NN brute force by using the "blocking" teqnuiqe for efficient execution
 __global__ void kernelNN2
 (float *pts1, float*pts2, float *distances, int *closest) {
 	// This implementation uses "blocking". It copies chuncks of data from the global 
@@ -95,6 +97,33 @@ __global__ void kernelNN2
 	}
 }
 
+//This kernel finds the NN brute force
+__global__ void kernelNN
+(float *pts1, float *pts2, float *distances, int *closest)
+{
+	// det er 1 tråd for hvert punkt i pts1
+	unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+	if (idx < COL) {
+		float min_distance = 9999999;
+		int closest_idx = -1;
+
+		for (int i = 0; i < COL; i++) {
+			float dist = (pts1[idx * 3 + 0] - pts2[i * 3 + 0]) * (pts1[idx * 3 + 0] - pts2[i * 3 + 0]) +
+				(pts1[idx * 3 + 1] - pts2[i * 3 + 1]) * (pts1[idx * 3 + 1] - pts2[i * 3 + 1]) +
+				(pts1[idx * 3 + 2] - pts2[i * 3 + 2]) * (pts1[idx * 3 + 2] - pts2[i * 3 + 2]);
+
+			if (dist < min_distance) {
+				min_distance = dist;
+				closest_idx = i;
+			}
+		}
+		closest[idx] = closest_idx;
+		distances[idx] = min_distance;
+	}
+}
+
+//This kernel detect mesh boundaries by exploiting the structure of the point cloud
 __global__ void edgeDetect(float *pts, int *indices, int num_regions) {// int *edge_indices, float edge_tresh, int num_regions, int region_size) {
 	unsigned int idx = threadIdx.x + blockIdx.x*blockDim.x;
 	//Only looking at Z values for kinect camera to detect edges. Exploit that point come organized in a matrix structure directly from the sensor. Looking at 4x4 regions in the depth matrix
@@ -133,6 +162,7 @@ __global__ void edgeDetect(float *pts, int *indices, int num_regions) {// int *e
 	}
 }
 
+//This kernel removes correspondences on the mesh boundary from the correspondences list
 __global__ void rmEdgesFromCorr(int *closest, int *edges1, int *edges2) {
 	unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -145,64 +175,7 @@ __global__ void rmEdgesFromCorr(int *closest, int *edges1, int *edges2) {
 	}
 }
 
-__global__ void kernelNN
-(float *pts1, float *pts2, float *distances, int *closest)
-{
-	// det er 1 tråd for hvert punkt i pts1
-	unsigned int idx = blockIdx.x * blockDim.x + threadIdx.x;
-
-	if (idx < COL) {
-		float min_distance = 9999999;
-		int closest_idx = -1;
-
-		for (int i = 0; i < COL; i++) {
-			float dist = (pts1[idx * 3 + 0] - pts2[i * 3 + 0]) * (pts1[idx * 3 + 0] - pts2[i * 3 + 0]) +
-				(pts1[idx * 3 + 1] - pts2[i * 3 + 1]) * (pts1[idx * 3 + 1] - pts2[i * 3 + 1]) +
-				(pts1[idx * 3 + 2] - pts2[i * 3 + 2]) * (pts1[idx * 3 + 2] - pts2[i * 3 + 2]);
-
-			if (dist < min_distance) {
-				min_distance = dist;
-				closest_idx = i;
-			}
-		}
-		closest[idx] = closest_idx;
-		distances[idx] = min_distance;
-	}
-}
-
-__global__ void testMindist
-(float *pts1, float *pts2, float *distarr, float *mindist) {
-	unsigned int idx = threadIdx.x;
-	float dist;
-	float curr_dist = 99999;
-	__shared__ float min_dist;
-	if (idx == 0) {
-		min_dist = 99999;
-		//mindist[0] = 100;
-	}
-
-	__syncthreads();
-	if (idx < 1024) {
-		for (int i = 0; i < 1024; i++) {
-			dist = (pts1[idx * 3 + 0] - pts2[i * 3 + 0])*(pts1[idx * 3 + 0] - pts2[i * 3 + 0]) +
-				(pts1[idx * 3 + 1] - pts2[i * 3 + 1])*(pts1[idx * 3 + 1] - pts2[i * 3 + 1]) +
-				(pts1[idx * 3 + 2] - pts2[i * 3 + 2])*(pts1[idx * 3 + 2] - pts2[i * 3 + 2]);
-			if (dist < curr_dist) {
-				curr_dist = dist;
-			}
-		}
-		distarr[idx] = curr_dist;
-		if (curr_dist < min_dist && curr_dist != 0) {
-			min_dist = curr_dist;
-			mindist[0] = min_dist;
-
-		}
-
-	}
-}
-
-//__device__ void calcDist(float *pt, float *pts, float *dist)
-
+//This kernel removes duplicate correspondences from the correspondences and keeps the correspondences with the smallest distance
 __global__ void kernelRmDup
 (int *closest, float *distances)
 {
@@ -223,43 +196,8 @@ __global__ void kernelRmDup
 	}
 }
 
-__global__ void kernelCreateSVD
-(float *pts1, float *pts2, float *closest, float* c1, float *c2)
-{
-	unsigned int idx = blockIdx.x *blockDim.x + threadIdx.x;
 
-	if (idx < COL) {
-
-	}
-}
-
-
-
-void computeCentroids(float *pt1, float *pt2, float *c1, float *c2) {
-	//Computing centroids is a highly sequential task, thus this is done on the host
-	int it1 = 0;
-
-	int it2 = 0;
-	for (int i = 0; i < COL; i++) {
-		if (pt1[i * 3] != -std::numeric_limits<float>::infinity()) {
-			c1[0] += pt1[i * 3 + 0];
-			c1[1] += pt1[i * 3 + 1];
-			c1[2] += pt1[i * 3 + 2];
-			it1++;
-		}
-		if (pt2[i * 3] != -std::numeric_limits<float>::infinity()) {
-			c2[0] += pt2[i * 3 + 0];
-			c2[1] += pt2[i * 3 + 1];
-			c2[2] += pt2[i * 3 + 2];
-			it2++;
-		}
-	}
-	for (int i = 0; i < ROW; i++) {
-		c1[i] = c1[i] / it1;
-		c2[i] = c2[i] / it2;
-	}
-}
-
+//Runs kernels after memory is allocated
 float run_kernel
 (float *pts1, float *pts2, float* distances, int *closest, int *edges1, int *edges2)
 {
@@ -270,7 +208,8 @@ float run_kernel
 	dim3 dimBlock(16, 1, 1); //threads per block
 	dim3 dimGrid(ceil((float)COL / dimBlock.x)); //number of blocks
 	printf("dimBlock.x: %d dimGrid.x %d\n", dimBlock.x, dimGrid.x);
-	cudaEventRecord(start);
+
+	cudaEventRecord(start); //start timer
 
 	edgeDetect << <dimGrid, dimBlock >> >
 		(pts1, edges1, 13568);
@@ -296,8 +235,6 @@ float run_kernel
 
 	dimBlock.x = blockSize;
 	dimGrid.x = ceil((float)COL / dimBlock.x);
-	//dimBlock(blockSize, 1, 1); //threads per block
-	//dimGrid(ceil((float)COL / dimBlock.x)); //number of blocks
 	printf("dimBlock.x: %d dimGrid.x %d\n", dimBlock.x, dimGrid.x);
 
 	//kernelNN2 << <dimGrid, dimBlock >> >(pts1, pts2, distances, closest);
@@ -314,7 +251,7 @@ float run_kernel
 	//kernelRmDup << <dimGrid, dimBlock >> > (closest, distances);
 	rmEdgesFromCorr << <dimGrid, dimBlock >> > (closest, edges1, edges2);
 
-	cudaEventRecord(stop);
+	cudaEventRecord(stop); //stop timer
 	cudaEventSynchronize(stop);
 	cudaEventElapsedTime(&time, start, stop);
 
@@ -329,6 +266,7 @@ float run_kernel
 	return time;
 }
 
+//This function is called from main and runs the entire procedure of NN detection and rejection
 float run_procedure(float *valse, float *balse, int *cpu_ptrclosest) {
 	float *gpu_ptr1;
 	float *gpu_ptr2;

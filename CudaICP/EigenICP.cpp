@@ -1,101 +1,13 @@
 #include "EigenICP.h"
-#include "kernel.h"
 
-#include <Eigen/StdVector>
 #include <Eigen/Dense>
-#include <Eigen/SVD>
+
 #include <iostream>
 #include <limits>
 #include <cmath>
 
 #define ROW 3
 #define COL 217088
-
-EigenICP::EigenICP(float *val1, float *val2) {
-	//ker_pts1 = new float[ROW*COL];
-	//ker_pts2 = new float[ROW*COL];
-	ker_closest = new int[COL];
-	readData(val1, val2);
-}
-
-EigenICP::~EigenICP() {
-	delete[] ker_closest;
-}
-
-void EigenICP::iterateICP() {
-	getNNfromKernel();
-	updateCorrespondences();
-	computeCentroids();
-	calculateTransformation();
-}
-
-void EigenICP::readData(float *cld1, float *cld2) {
-	ker_pts1 = cld1;
-	ker_pts2 = cld2;
-	for (int i = 0; i < COL; i++) {
-		pts1(0, i) = cld1[i * 3 + 0];
-		pts1(1, i) = cld1[i * 3 + 1];
-		pts1(2, i) = cld1[i * 3 + 2];
-		pts2(0, i) = cld2[i * 3 + 0];
-		pts2(1, i) = cld2[i * 3 + 1];
-		pts2(2, i) = cld2[i * 3 + 2];
-	}
-}
-
-void EigenICP::updateCorrespondences() {
-	for (int i = 0; i < COL; i++) {
-		corr(i) = ker_closest[i];
-	}
-}
-
-void EigenICP::applyTransformation() {}
-
-void EigenICP::calculateTransformation() {
-	for (int i = 0; i < COL; i++) {
-		if (corr(i) != 0) {
-			pts1(0, i) -= centroid1(0); //Normalize
-			pts1(1, i) -= centroid1(1); //Normalize
-			pts1(2, i) -= centroid1(2); //Normalize
-			pts2(0, corr(i)) -= centroid2(0); //Normalize
-			pts2(1, corr(i)) -= centroid2(1); //Normalize
-			pts2(2, corr(i)) -= centroid2(2); //Normalize
-			SVD += pts2.block<3, 1>(0, corr(i))*pts1.block<3, 1>(0, i).transpose(); //Compute SVD			
-		}
-	}
-
-	Eigen::JacobiSVD<Eigen::Matrix3f> USV(SVD, Eigen::ComputeFullU | Eigen::ComputeFullV);
-	R = USV.matrixU()*USV.matrixV().transpose();
-	T = centroid2.head(3) - R*centroid1.head(3);
-
-	std::cout << R << std::endl;
-	std::cout << T << std::endl;
-
-}
-
-void EigenICP::getNNfromKernel() {
-	run_procedure(ker_pts1, ker_pts2, ker_closest);
-}
-
-void EigenICP::computeCentroids() {
-	centroid1 = Eigen::Vector3f::Zero();
-	centroid2 = Eigen::Vector3f::Zero();
-	counter = 0;
-	for (int i = 0; i < COL; i++) {
-		if (corr(i) != 0) {
-			centroid1(0) += pts1(0,i);
-			centroid1(1) += pts1(1, i);
-			centroid1(2) += pts1(2, i);
-			centroid2(0) += pts2(0,corr(i));
-			centroid2(1) += pts2(1, corr(i));
-			centroid2(2) += pts2(2, corr(i));
-			counter++;
-		}
-	}
-	centroid1 = centroid1 / counter;
-	centroid2 = centroid2 / counter;
-	printf("Centroid 1: (%f, %f, %f)\n", centroid1(0), centroid1(1), centroid1(2));
-	printf("Centroid 2: (%f, %f, %f)\n", centroid2(0), centroid2(1), centroid2(2));
-}
 
 Eigen::Matrix4f icpBruteCPU(float *cld1, float *cld2, int *index) {
 
