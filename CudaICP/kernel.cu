@@ -6,10 +6,25 @@
 #include <ctime>
 #include <iostream>
 
+#include <cublas_v2.h>
+
 #include "kernel.h"
 
 #define ROW 3 //the dimension
 #define COL 217088 //number of points
+
+#define PERR(call) \
+  if (call) {\
+   fprintf(stderr, "%s:%d Error [%s] on "#call"\n", __FILE__, __LINE__,\
+      cudaGetErrorString(cudaGetLastError()));\
+   exit(1);\
+  }
+#define ERRCHECK \
+  if (cudaPeekAtLastError()) { \
+    fprintf(stderr, "%s:%d Error [%s]\n", __FILE__, __LINE__,\
+       cudaGetErrorString(cudaGetLastError()));\
+    exit(1);\
+  }
 
 __device__ const int numPoints = 217088;
 __device__ const int blockSize = 512;
@@ -194,6 +209,127 @@ __global__ void kernelRmDup
 		}
 
 	}
+}
+
+__device__ void syminverse3x3(float *A, int idx) {
+	float A_temp[9];
+	
+	float det = A[0] * (A[4] * A[8] - A[5] * A[5]) -
+		A[1] * (A[1] * A[8] - A[5] * A[6]) +
+		A[2] * (A[1] * A[5] - A[4] * A[6]);
+	float invdet = 1 / det;
+
+	A_temp[0] = (A[4] * A[8] - A[5] * A[5])*invdet;
+	A_temp[1] = (A[6] * A[5] - A[1] * A[8])*invdet;
+	A_temp[2] = (A[1] * A[5] - A[6] * A[4])*invdet;
+	A_temp[3] = A_temp[1];
+	A_temp[4] = (A[0] * A[8] - A[6] * A[6])*invdet;
+	A_temp[5] = (A[1] * A[6] - A[0] * A[5])*invdet;
+	A_temp[6] = A_temp[2];
+	A_temp[7] = A_temp[5];
+	A_temp[8] = (A[0] * A[4] - A[1] * A[1])*invdet;
+
+
+	for (int i = 0; i < 9; i++) {
+		A[i] = A_temp[i];		
+	}
+}
+
+__global__ void
+kernelNormals(float *pts, float *norms, int radius)
+{
+	unsigned int idx = threadIdx.x + blockIdx.x*blockDim.x;
+
+	if (idx < numPoints) {
+		if (isfinite(pts[idx * 3])) {
+			int a = idx / 512; //this row
+			int b = idx % 512; //this col
+			bool finite = false;
+			float AtA[9] = { 0,0,0 , 0,0,0, 0,0,0 }; //rowmajor 3x3 matrix
+			float Atd[3] = { 0,0,0 };
+			float d = sqrt(pts[idx * 3 + 0] * pts[idx * 3 + 0] + pts[idx * 3 + 1] * pts[idx * 3 + 1] + pts[idx * 3 + 2] + pts[idx * 3 + 2]);
+			for (int i = -radius; i <= radius; i++) {
+				for (int j = -radius; j <= radius; j++) {
+					if (a + i >= 0 && a + i < 424 && b + j >= 0 && b + j < 512 && (i*i + j*j) <= (radius + 1)*(radius + 1)) { //this check makes sure we are within the limits of the 512x424 matrix and that we do a radius search instead of a square search
+						int this_ind = (a + i) * 512 + b + j;
+						if (isfinite(pts[this_ind * 3])) {
+							AtA[0] += pts[this_ind * 3 + 0] * pts[this_ind * 3 + 0];
+							AtA[4] += pts[this_ind * 3 + 1] * pts[this_ind * 3 + 1];
+							AtA[8] += pts[this_ind * 3 + 2] * pts[this_ind * 3 + 2];
+							AtA[1] += pts[this_ind * 3 + 0] * pts[this_ind * 3 + 1];
+							AtA[2] += pts[this_ind * 3 + 0] * pts[this_ind * 3 + 2];
+							AtA[5] += pts[this_ind * 3 + 1] * pts[this_ind * 3 + 2];
+
+							Atd[0] += d*pts[this_ind * 3 + 0];
+							Atd[1] += d*pts[this_ind * 3 + 1];
+							Atd[2] += d*pts[this_ind * 3 + 2];
+							finite = true;
+						}
+					}
+				}
+			}
+			if (finite) {
+				AtA[3] = AtA[1];
+				AtA[6] = AtA[2];
+				AtA[7] = AtA[5];
+
+				if (idx == 100000) {
+					for (int i = 0; i < 9; i++) {
+						printf("%f ",AtA[i]);
+						if ((i + 1) % 3 == 0) {
+							printf("\n");
+						}
+					}
+				}
+				syminverse3x3(AtA, idx);
+				if (idx == 100000) {
+					printf("\n"); printf("\n"); printf("\n");
+					for (int i = 0; i < 9; i++) {
+						printf("%f ", AtA[i]);
+						if ((i + 1) % 3 == 0) {
+							printf("\n");
+						}
+					}
+				}
+				float norm = 0;
+				for (int i = 0; i < 3; i++) {
+					norms[idx * 3 + i] = AtA[i*3+0] * Atd[0] + AtA[i * 3 + 1] * Atd[1] + AtA[i * 3 + 2] * Atd[2];
+					norm += norms[idx * 3 + i]* norms[idx * 3 + i];
+				}				
+				//normalize to create unit normal
+				norm = sqrt(norm);
+				for (int i = 0; i < 3; i++) {
+					norms[idx * 3 + i] = norms[idx * 3 + i] / norm;
+				}
+			}
+			else {
+				for (int i = 0; i < 3; i++) {
+					norms[idx * 3 + i] = 0;
+				}
+			}
+		}
+		else {
+			for (int i = 0; i < 3; i++) {
+				norms[idx * 3 + i] = 0;
+			}
+		}
+		
+	}
+}
+
+void testing(float *model, float *normals) {
+	float *gpu_model, *gpu_normals;
+	dim3 dimBlock(512, 1, 1);
+	dim3 dimGrid(ceil((float)COL / dimBlock.x), 1, 1);
+	PERR(cudaMalloc(&gpu_model, ROW*COL * sizeof(float)));
+	PERR(cudaMalloc(&gpu_normals, ROW*COL * sizeof(float)));
+	PERR(cudaMemcpy(gpu_model, model, ROW*COL * sizeof(float), cudaMemcpyHostToDevice));
+	kernelNormals << <dimGrid, dimBlock >> >(gpu_model, gpu_normals, 5);
+	ERRCHECK;
+	PERR(cudaMemcpy(normals, gpu_normals, ROW*COL * sizeof(float), cudaMemcpyDeviceToHost));
+	PERR(cudaFree(gpu_model));
+	PERR(cudaFree(gpu_normals));
+	cudaDeviceSynchronize;
 }
 
 

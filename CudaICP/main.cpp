@@ -19,7 +19,23 @@ Eigen::Matrix3f rot_from_RPY(Eigen::Vector3f rpy); //Calculate rotation matric f
 Eigen::Vector3f RPY_from_rot(Eigen::Matrix3f rot); //Calculate roll-pitch-yaw angles from rotation matrix
 
 int main() {
-	int icp_iteratons = 100; //Number of ICP iterations
+	float *normals_GPU = new float[ROW*COL];
+	float *model = new float[ROW*COL];
+	std::string name;
+	name = "Cloud_uncompressed" + std::to_string(0) + ".txt";
+	readFile(model, name); //Read file to "model"
+	testing(model,normals_GPU);
+
+	for (int i = 0; i < COL; i++) {
+		printf("%f\t%f\t%f\n", normals_GPU[i * 3 + 0], normals_GPU[i * 3 + 1], normals_GPU[i * 3 + 2]);
+	}
+
+	delete[] normals_GPU; normals_GPU = nullptr;
+	delete[] model; model = nullptr;
+
+
+
+	/*int icp_iteratons = 100; //Number of ICP iterations
 	int dataset_start = 30; //Dataset start number. Format: "name" + number + ".txt"
 	int dataset_stop = 31; //Dataset stop number. Format: "name" + number + ".txt"
 
@@ -132,7 +148,7 @@ int main() {
 	delete[] target; target = nullptr;
 	delete[] cpu_ptrclosest; cpu_ptrclosest = nullptr;
 
-
+	*/
 	system("pause");
 	return 0;
 }
