@@ -19,6 +19,7 @@ Eigen::Matrix3f rot_from_RPY(Eigen::Vector3f rpy); //Calculate rotation matric f
 Eigen::Vector3f RPY_from_rot(Eigen::Matrix3f rot); //Calculate roll-pitch-yaw angles from rotation matrix
 
 int main() {
+	/*
 	float *normals_GPU = new float[ROW*COL];
 	float *model = new float[ROW*COL];
 	std::string name;
@@ -27,15 +28,15 @@ int main() {
 	testing(model,normals_GPU);
 
 	for (int i = 0; i < COL; i++) {
-		printf("%f\t%f\t%f\n", normals_GPU[i * 3 + 0], normals_GPU[i * 3 + 1], normals_GPU[i * 3 + 2]);
+		//printf("%f\t%f\t%f\n", normals_GPU[i * 3 + 0], normals_GPU[i * 3 + 1], normals_GPU[i * 3 + 2]);
 	}
 
 	delete[] normals_GPU; normals_GPU = nullptr;
 	delete[] model; model = nullptr;
+	*/
 
 
-
-	/*int icp_iteratons = 100; //Number of ICP iterations
+	int icp_iteratons = 100; //Number of ICP iterations
 	int dataset_start = 30; //Dataset start number. Format: "name" + number + ".txt"
 	int dataset_stop = 31; //Dataset stop number. Format: "name" + number + ".txt"
 
@@ -90,7 +91,8 @@ int main() {
 
 		//Compute normals
 		startTime = clock();
-		comp_normal(target,normals);
+		//comp_normal(target,normals); //On the CPU using EIGEN
+		normals_GPU(target, normals); //Approx normals on the GPU
 		endTime = clock();
 		printf("Normal computation took: %ld ms \n", endTime - startTime);
 
@@ -99,7 +101,7 @@ int main() {
 			int corr = 0;
 
 			//Find NN on GPU
-			float executiontime = run_procedure(model, target, cpu_ptrclosest);			
+			float executiontime = NN_GPU(model, target, cpu_ptrclosest);			
 
 			//Calculate ICP transfrom from NN
 			//Eigen::Matrix4f trans = icpBruteCPU(model, target, cpu_ptrclosest); //Point-to-Point ICP
@@ -148,7 +150,7 @@ int main() {
 	delete[] target; target = nullptr;
 	delete[] cpu_ptrclosest; cpu_ptrclosest = nullptr;
 
-	*/
+	
 	system("pause");
 	return 0;
 }

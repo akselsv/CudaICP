@@ -49,7 +49,7 @@ __global__ void kernelNNStructured
 		int b = idx % 512; //this col
 		for (int i = -area; i <= area; i++) {
 			for (int j = -area; j <= area; j++) {
-				if (a + i >= 0 && a + i < 424 && b + j >= 0 && b + j < 512 && (i*i + j*j) <= (area+1)*(area+1)) { //this check makes sure we are within the limits of the 512x424 matrix and that we do a radius search instead of a square search
+				if (a + i >= 0 && a + i < 424 && b + j >= 0 && b + j < 512 && (i*i + j*j) <= (area + 1)*(area + 1)) { //this check makes sure we are within the limits of the 512x424 matrix and that we do a radius search instead of a square search
 					int this_ind = (a + i) * 512 + b + j;
 					float dist = (pts1[idx * 3 + 0] - pts2[this_ind * 3 + 0])*(pts1[idx * 3 + 0] - pts2[this_ind * 3 + 0]) +
 						(pts1[idx * 3 + 1] - pts2[this_ind * 3 + 1])*(pts1[idx * 3 + 1] - pts2[this_ind * 3 + 1]) +
@@ -211,9 +211,9 @@ __global__ void kernelRmDup
 	}
 }
 
-__device__ void syminverse3x3(float *A, int idx) {
+__device__ void syminverse3x3(float *A) {
 	float A_temp[9];
-	
+
 	float det = A[0] * (A[4] * A[8] - A[5] * A[5]) -
 		A[1] * (A[1] * A[8] - A[5] * A[6]) +
 		A[2] * (A[1] * A[5] - A[4] * A[6]);
@@ -231,7 +231,7 @@ __device__ void syminverse3x3(float *A, int idx) {
 
 
 	for (int i = 0; i < 9; i++) {
-		A[i] = A_temp[i];		
+		A[i] = A_temp[i];
 	}
 }
 
@@ -273,29 +273,13 @@ kernelNormals(float *pts, float *norms, int radius)
 				AtA[6] = AtA[2];
 				AtA[7] = AtA[5];
 
-				if (idx == 100000) {
-					for (int i = 0; i < 9; i++) {
-						printf("%f ",AtA[i]);
-						if ((i + 1) % 3 == 0) {
-							printf("\n");
-						}
-					}
-				}
-				syminverse3x3(AtA, idx);
-				if (idx == 100000) {
-					printf("\n"); printf("\n"); printf("\n");
-					for (int i = 0; i < 9; i++) {
-						printf("%f ", AtA[i]);
-						if ((i + 1) % 3 == 0) {
-							printf("\n");
-						}
-					}
-				}
+				syminverse3x3(AtA);
+
 				float norm = 0;
 				for (int i = 0; i < 3; i++) {
-					norms[idx * 3 + i] = AtA[i*3+0] * Atd[0] + AtA[i * 3 + 1] * Atd[1] + AtA[i * 3 + 2] * Atd[2];
-					norm += norms[idx * 3 + i]* norms[idx * 3 + i];
-				}				
+					norms[idx * 3 + i] = AtA[i * 3 + 0] * Atd[0] + AtA[i * 3 + 1] * Atd[1] + AtA[i * 3 + 2] * Atd[2];
+					norm += norms[idx * 3 + i] * norms[idx * 3 + i];
+				}
 				//normalize to create unit normal
 				norm = sqrt(norm);
 				for (int i = 0; i < 3; i++) {
@@ -313,29 +297,30 @@ kernelNormals(float *pts, float *norms, int radius)
 				norms[idx * 3 + i] = 0;
 			}
 		}
-		
+
 	}
 }
 
-void testing(float *model, float *normals) {
+//Computes the approx normals on the GPU exploiting the structure of the depth image
+void normals_GPU(float *model, float *normals) {
 	float *gpu_model, *gpu_normals;
 	dim3 dimBlock(512, 1, 1);
 	dim3 dimGrid(ceil((float)COL / dimBlock.x), 1, 1);
 	PERR(cudaMalloc(&gpu_model, ROW*COL * sizeof(float)));
 	PERR(cudaMalloc(&gpu_normals, ROW*COL * sizeof(float)));
 	PERR(cudaMemcpy(gpu_model, model, ROW*COL * sizeof(float), cudaMemcpyHostToDevice));
-	kernelNormals << <dimGrid, dimBlock >> >(gpu_model, gpu_normals, 5);
+	kernelNormals << <dimGrid, dimBlock >> > (gpu_model, gpu_normals, 3);
 	ERRCHECK;
 	PERR(cudaMemcpy(normals, gpu_normals, ROW*COL * sizeof(float), cudaMemcpyDeviceToHost));
 	PERR(cudaFree(gpu_model));
 	PERR(cudaFree(gpu_normals));
-	cudaDeviceSynchronize;
+	cudaDeviceSynchronize();
 }
 
 
 //Runs kernels after memory is allocated
 float run_kernel
-(float *pts1, float *pts2, float* distances, int *closest, int *edges1, int *edges2)
+(float *d_model, float *d_target, float* d_distances, int *d_closest, int *d_modelEdges, int *d_targetEdges)
 {
 	cudaEvent_t start, stop;
 	float time;
@@ -347,157 +332,57 @@ float run_kernel
 
 	cudaEventRecord(start); //start timer
 
-	edgeDetect << <dimGrid, dimBlock >> >
-		(pts1, edges1, 13568);
-
-	cudaError_t error = cudaGetLastError();
-	if (error != cudaSuccess) {
-		printf("run_kernel1 launch failed\n");
-		printf("dimBlock: %d, %d\n", dimBlock.x, dimBlock.y);
-		printf("dimGrid: %d, %d\n", dimGrid.x, dimGrid.y);
-		printf("%s\n", cudaGetErrorString(error));
-	}
-
-	edgeDetect << <dimGrid, dimBlock >> >
-		(pts2, edges2, 13568);
-
-	error = cudaGetLastError();
-	if (error != cudaSuccess) {
-		printf("run_kernel1 launch failed\n");
-		printf("dimBlock: %d, %d\n", dimBlock.x, dimBlock.y);
-		printf("dimGrid: %d, %d\n", dimGrid.x, dimGrid.y);
-		printf("%s\n", cudaGetErrorString(error));
-	}
+	edgeDetect << <dimGrid, dimBlock >> > (d_model, d_modelEdges, 13568);
+	ERRCHECK;
+	edgeDetect << <dimGrid, dimBlock >> > (d_target, d_targetEdges, 13568);
+	ERRCHECK;
 
 	dimBlock.x = blockSize;
 	dimGrid.x = ceil((float)COL / dimBlock.x);
 	printf("dimBlock.x: %d dimGrid.x %d\n", dimBlock.x, dimGrid.x);
 
 	//kernelNN2 << <dimGrid, dimBlock >> >(pts1, pts2, distances, closest);
-	kernelNNStructured << <dimGrid, dimBlock >> > (pts1, pts2, distances, closest, 7);
-
-	error = cudaGetLastError();
-	if (error != cudaSuccess) {
-		printf("run_kernel1 launch failed\n");
-		printf("dimBlock: %d, %d\n", dimBlock.x, dimBlock.y);
-		printf("dimGrid: %d, %d\n", dimGrid.x, dimGrid.y);
-		printf("%s\n", cudaGetErrorString(error));
-	}
-
+	kernelNNStructured << <dimGrid, dimBlock >> > (d_model, d_target, d_distances, d_closest, 7);
+	ERRCHECK;
 	//kernelRmDup << <dimGrid, dimBlock >> > (closest, distances);
-	rmEdgesFromCorr << <dimGrid, dimBlock >> > (closest, edges1, edges2);
-
+	rmEdgesFromCorr << <dimGrid, dimBlock >> > (d_closest, d_modelEdges, d_targetEdges);
+	ERRCHECK;
 	cudaEventRecord(stop); //stop timer
 	cudaEventSynchronize(stop);
 	cudaEventElapsedTime(&time, start, stop);
-
-	error = cudaGetLastError();
-	if (error != cudaSuccess) {
-		printf("run_kernel1 launch failed\n");
-		printf("dimBlock: %d, %d\n", dimBlock.x, dimBlock.y);
-		printf("dimGrid: %d, %d\n", dimGrid.x, dimGrid.y);
-		printf("%s\n", cudaGetErrorString(error));
-	}
-
 	return time;
 }
 
-//This function is called from main and runs the entire procedure of NN detection and rejection
-float run_procedure(float *valse, float *balse, int *cpu_ptrclosest) {
-	float *gpu_ptr1;
-	float *gpu_ptr2;
-	float *gpu_ptrdist;
-	int *gpu_ptrclosest;
-	int *gpu_ptredges1; //COL 1 if edge, 0 if not
-	int *gpu_ptredges2; //COL 1 if edge, 0 if not
+//This function is called from main and runs the entire procedure of NN detection, rejection and normal computation
+float NN_GPU(float *model, float *target, int *closest) {
+	float *gpuptr_model;
+	float *gpuptr_target;
+	float *gpuptr_dist;
+	int *gpuptr_closest;
+	int *gpuptr_modelEdges; //COL 1 if edge, 0 if not
+	int *gpuptr_targetEdges; //COL 1 if edge, 0 if not
 
-	cudaError_t error = cudaMalloc(&gpu_ptr1, ROW*COL * sizeof(float));
-	if (error != cudaSuccess) {
-		printf("%s\n", cudaGetErrorString(error));
-		printf("1\n");
-	}
+	PERR(cudaMalloc(&gpuptr_model, ROW*COL * sizeof(float)));
+	PERR(cudaMalloc(&gpuptr_modelEdges, COL * sizeof(int)));
+	PERR(cudaMalloc(&gpuptr_target, ROW*COL * sizeof(float)));
+	PERR(cudaMalloc(&gpuptr_targetEdges, COL * sizeof(int)));
+	PERR(cudaMalloc(&gpuptr_dist, COL * sizeof(float)));
+	PERR(cudaMalloc(&gpuptr_closest, COL * sizeof(int)));
 
+	PERR(cudaMemcpy(gpuptr_model, model, ROW*COL * sizeof(float), cudaMemcpyHostToDevice));
+	PERR(cudaMemcpy(gpuptr_target, target, ROW*COL * sizeof(float), cudaMemcpyHostToDevice));
 
-	error = cudaMalloc(&gpu_ptredges1, COL * sizeof(int)); //remove
-	if (error != cudaSuccess) {
-		printf("%s\n", cudaGetErrorString(error));
-		printf("1\n");
-	}
+	float executiontime = run_kernel(gpuptr_model, gpuptr_target, gpuptr_dist, gpuptr_closest, gpuptr_modelEdges, gpuptr_targetEdges);
 
+	PERR(cudaMemcpy(closest, gpuptr_closest, COL * sizeof(int), cudaMemcpyDeviceToHost));
 
-	error = cudaMalloc(&gpu_ptr2, ROW*COL * sizeof(float));
-	if (error != cudaSuccess) {
-		printf("%s\n", cudaGetErrorString(error));
-		printf("2\n");
-	}
+	PERR(cudaFree(gpuptr_model));
+	PERR(cudaFree(gpuptr_modelEdges));
+	PERR(cudaFree(gpuptr_target));
+	PERR(cudaFree(gpuptr_targetEdges));
+	PERR(cudaFree(gpuptr_dist));
+	PERR(cudaFree(gpuptr_closest));
 
-	error = cudaMalloc(&gpu_ptredges2, COL * sizeof(int)); //remove
-	if (error != cudaSuccess) {
-		printf("%s\n", cudaGetErrorString(error));
-		printf("1\n");
-	}
-
-	error = cudaMalloc(&gpu_ptrdist, COL * sizeof(float));
-	if (error != cudaSuccess) {
-		printf("%s\n", cudaGetErrorString(error));
-		printf("3\n");
-	}
-
-	error = cudaMalloc(&gpu_ptrclosest, COL * sizeof(int));
-	if (error != cudaSuccess) {
-		printf("%s\n", cudaGetErrorString(error));
-		printf("4\n");
-	}
-
-	error = cudaMemcpy(gpu_ptr1, valse, ROW*COL * sizeof(float), cudaMemcpyHostToDevice);
-	if (error != cudaSuccess) {
-		printf("%s\n", cudaGetErrorString(error));
-		printf("5\n");
-	}
-
-	error = cudaMemcpy(gpu_ptr2, balse, ROW*COL * sizeof(float), cudaMemcpyHostToDevice);
-	if (error != cudaSuccess) {
-		printf("%s\n", cudaGetErrorString(error));
-		printf("6\n");
-	}
-	
-	float executiontime = run_kernel(gpu_ptr1, gpu_ptr2, gpu_ptrdist, gpu_ptrclosest, gpu_ptredges1, gpu_ptredges2);
-
-	error = cudaMemcpy(cpu_ptrclosest, gpu_ptrclosest, COL * sizeof(int), cudaMemcpyDeviceToHost);
-	if (error != cudaSuccess) {
-		printf("%s\n", cudaGetErrorString(error));
-		printf("7\n");
-	}
-	error = cudaFree(gpu_ptr1);
-	if (error != cudaSuccess) {
-		printf("%s\n", cudaGetErrorString(error));
-		printf("8\n");
-	}
-	error = cudaFree(gpu_ptredges1);
-	if (error != cudaSuccess) {
-		printf("%s\n", cudaGetErrorString(error));
-		printf("8\n");
-	}
-	error = cudaFree(gpu_ptr2);
-	if (error != cudaSuccess) {
-		printf("%s\n", cudaGetErrorString(error));
-		printf("9\n");
-	}
-	error = cudaFree(gpu_ptredges2);
-	if (error != cudaSuccess) {
-		printf("%s\n", cudaGetErrorString(error));
-		printf("8\n");
-	}
-	error = cudaFree(gpu_ptrdist);
-	if (error != cudaSuccess) {
-		printf("%s\n", cudaGetErrorString(error));
-		printf("10\n");
-	}
-	error = cudaFree(gpu_ptrclosest);
-	if (error != cudaSuccess) {
-		printf("%s\n", cudaGetErrorString(error));
-		printf("11\n");
-	}
 	cudaDeviceSynchronize();
 	cudaDeviceReset();
 
