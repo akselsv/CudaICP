@@ -19,26 +19,9 @@ Eigen::Matrix3f rot_from_RPY(Eigen::Vector3f rpy); //Calculate rotation matric f
 Eigen::Vector3f RPY_from_rot(Eigen::Matrix3f rot); //Calculate roll-pitch-yaw angles from rotation matrix
 
 int main() {
-	/*
-	float *normals_GPU = new float[ROW*COL];
-	float *model = new float[ROW*COL];
-	std::string name;
-	name = "Cloud_uncompressed" + std::to_string(0) + ".txt";
-	readFile(model, name); //Read file to "model"
-	testing(model,normals_GPU);
-
-	for (int i = 0; i < COL; i++) {
-		//printf("%f\t%f\t%f\n", normals_GPU[i * 3 + 0], normals_GPU[i * 3 + 1], normals_GPU[i * 3 + 2]);
-	}
-
-	delete[] normals_GPU; normals_GPU = nullptr;
-	delete[] model; model = nullptr;
-	*/
-
-
-	int icp_iteratons = 100; //Number of ICP iterations
-	int dataset_start = 30; //Dataset start number. Format: "name" + number + ".txt"
-	int dataset_stop = 31; //Dataset stop number. Format: "name" + number + ".txt"
+	int icp_iteratons = 30; //Number of ICP iterations
+	int dataset_start = 0; //Dataset start number. Format: "name" + number + ".txt"
+	int dataset_stop = 49; //Dataset stop number. Format: "name" + number + ".txt"
 
 
 	long startTime;
@@ -61,7 +44,7 @@ int main() {
 	readFile(model, name); //Read file to "model"
 
 	//Start registration
-	for (int i = dataset_start+1; i < dataset_stop+1; i++) {
+	for (int i = dataset_start + 1; i < dataset_stop + 1; i++) {
 		//Previous model becomes target
 		float *temp = target;
 		target = model;
@@ -91,8 +74,8 @@ int main() {
 
 		//Compute normals
 		startTime = clock();
-		//comp_normal(target,normals); //On the CPU using EIGEN
 		normals_GPU(target, normals); //Approx normals on the GPU
+		//comp_normal(target,normals); //On the CPU using EIGEN
 		endTime = clock();
 		printf("Normal computation took: %ld ms \n", endTime - startTime);
 
@@ -101,7 +84,7 @@ int main() {
 			int corr = 0;
 
 			//Find NN on GPU
-			float executiontime = NN_GPU(model, target, cpu_ptrclosest);			
+			float executiontime = NN_GPU(model, target, cpu_ptrclosest);
 
 			//Calculate ICP transfrom from NN
 			//Eigen::Matrix4f trans = icpBruteCPU(model, target, cpu_ptrclosest); //Point-to-Point ICP
@@ -119,7 +102,7 @@ int main() {
 			}
 
 			//Calculate ICP-RMS error and count the number of correspondences
-			float rms_err = 0;			
+			float rms_err = 0;
 			for (int j = 0; j < COL; j++) {
 				if (cpu_ptrclosest[j] != -1) {
 					rms_err += (model[j * 3 + 0] - target[cpu_ptrclosest[j] * 3 + 0])*(model[j * 3 + 0] - target[cpu_ptrclosest[j] * 3 + 0]) +
@@ -133,6 +116,7 @@ int main() {
 			//Write Performance to file
 			outfile << RPY_from_rot(accuICPTrans.block<3, 3>(0, 0)).transpose() << " " << accuICPTrans.block<3, 1>(0, 3).transpose() << " " << corr << " " << rms_err << " " << executiontime << "\n";
 		}
+		writeFile(model, 6);
 
 		//update transformation and write to file
 		absTrans = accuICPTrans*absTrans;
@@ -144,13 +128,14 @@ int main() {
 
 	//Close and terminate
 	transfile.close();
-	outfile.close();	
+	outfile.close();
 	delete[] normals; normals = nullptr;
 	delete[] model; model = nullptr;
 	delete[] target; target = nullptr;
 	delete[] cpu_ptrclosest; cpu_ptrclosest = nullptr;
-
 	
+
+
 	system("pause");
 	return 0;
 }

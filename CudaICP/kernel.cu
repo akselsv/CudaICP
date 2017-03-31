@@ -13,23 +13,279 @@
 #define ROW 3 //the dimension
 #define COL 217088 //number of points
 
+#define MAX(a, b) ((a)>(b)?(a):(b))
+#define n 3
+
 #define PERR(call) \
   if (call) {\
-   fprintf(stderr, "%s:%d Error [%s] on "#call"\n", __FILE__, __LINE__,\
+    fprintf(stderr, "%s:%d Error [%s] on "#call"\n", __FILE__, __LINE__,\
       cudaGetErrorString(cudaGetLastError()));\
-   exit(1);\
+	system("pause");\
+    exit(1);\
   }
 #define ERRCHECK \
   if (cudaPeekAtLastError()) { \
     fprintf(stderr, "%s:%d Error [%s]\n", __FILE__, __LINE__,\
        cudaGetErrorString(cudaGetLastError()));\
+	system("pause");\
     exit(1);\
   }
 
 __device__ const int numPoints = 217088;
 __device__ const int blockSize = 512;
-
 int threads = blockSize;
+
+
+
+__device__ void tred2(double V[n][n], double d[n], double e[n]) {
+
+	//  This is derived from the Algol procedures tred2 by
+	//  Bowdler, Martin, Reinsch, and Wilkinson, Handbook for
+	//  Auto. Comp., Vol.ii-Linear Algebra, and the corresponding
+	//  Fortran subroutine in EISPACK.
+
+	for (int j = 0; j < n; j++) {
+		d[j] = V[n - 1][j];
+	}
+
+	// Householder reduction to tridiagonal form.
+
+	for (int i = n - 1; i > 0; i--) {
+
+		// Scale to avoid under/overflow.
+
+		double scale = 0.0;
+		double h = 0.0;
+		for (int k = 0; k < i; k++) {
+			scale = scale + fabs(d[k]);
+		}
+		if (scale == 0.0) {
+			e[i] = d[i - 1];
+			for (int j = 0; j < i; j++) {
+				d[j] = V[i - 1][j];
+				V[i][j] = 0.0;
+				V[j][i] = 0.0;
+			}
+		}
+		else {
+
+			// Generate Householder vector.
+
+			for (int k = 0; k < i; k++) {
+				d[k] /= scale;
+				h += d[k] * d[k];
+			}
+			double f = d[i - 1];
+			double g = sqrt(h);
+			if (f > 0) {
+				g = -g;
+			}
+			e[i] = scale * g;
+			h = h - f * g;
+			d[i - 1] = f - g;
+			for (int j = 0; j < i; j++) {
+				e[j] = 0.0;
+			}
+
+			// Apply similarity transformation to remaining columns.
+
+			for (int j = 0; j < i; j++) {
+				f = d[j];
+				V[j][i] = f;
+				g = e[j] + V[j][j] * f;
+				for (int k = j + 1; k <= i - 1; k++) {
+					g += V[k][j] * d[k];
+					e[k] += V[k][j] * f;
+				}
+				e[j] = g;
+			}
+			f = 0.0;
+			for (int j = 0; j < i; j++) {
+				e[j] /= h;
+				f += e[j] * d[j];
+			}
+			double hh = f / (h + h);
+			for (int j = 0; j < i; j++) {
+				e[j] -= hh * d[j];
+			}
+			for (int j = 0; j < i; j++) {
+				f = d[j];
+				g = e[j];
+				for (int k = j; k <= i - 1; k++) {
+					V[k][j] -= (f * e[k] + g * d[k]);
+				}
+				d[j] = V[i - 1][j];
+				V[i][j] = 0.0;
+			}
+		}
+		d[i] = h;
+	}
+
+	// Accumulate transformations.
+
+	for (int i = 0; i < n - 1; i++) {
+		V[n - 1][i] = V[i][i];
+		V[i][i] = 1.0;
+		double h = d[i + 1];
+		if (h != 0.0) {
+			for (int k = 0; k <= i; k++) {
+				d[k] = V[k][i + 1] / h;
+			}
+			for (int j = 0; j <= i; j++) {
+				double g = 0.0;
+				for (int k = 0; k <= i; k++) {
+					g += V[k][i + 1] * V[k][j];
+				}
+				for (int k = 0; k <= i; k++) {
+					V[k][j] -= g * d[k];
+				}
+			}
+		}
+		for (int k = 0; k <= i; k++) {
+			V[k][i + 1] = 0.0;
+		}
+	}
+	for (int j = 0; j < n; j++) {
+		d[j] = V[n - 1][j];
+		V[n - 1][j] = 0.0;
+	}
+	V[n - 1][n - 1] = 1.0;
+	e[0] = 0.0;
+}
+
+
+
+__device__ void tql2(double V[n][n], double d[n], double e[n]) {
+	// Symmetric tridiagonal QL algorithm.
+
+	//  This is derived from the Algol procedures tql2, by
+	//  Bowdler, Martin, Reinsch, and Wilkinson, Handbook for
+	//  Auto. Comp., Vol.ii-Linear Algebra, and the corresponding
+	//  Fortran subroutine in EISPACK.
+
+	for (int i = 1; i < n; i++) {
+		e[i - 1] = e[i];
+	}
+	e[n - 1] = 0.0;
+
+	double f = 0.0;
+	double tst1 = 0.0;
+	double eps = pow(2.0, -52.0);
+	for (int l = 0; l < n; l++) {
+
+		// Find small subdiagonal element
+
+		tst1 = MAX(tst1, fabs(d[l]) + fabs(e[l]));
+		int m = l;
+		while (m < n) {
+			if (fabs(e[m]) <= eps*tst1) {
+				break;
+			}
+			m++;
+		}
+
+		// If m == l, d[l] is an eigenvalue,
+		// otherwise, iterate.
+
+		if (m > l) {
+			int iter = 0;
+			do {
+				iter = iter + 1;  // (Could check iteration count here.)
+
+								  // Compute implicit shift
+
+				double g = d[l];
+				double p = (d[l + 1] - g) / (2.0 * e[l]);
+				double r = sqrt(p*p + 1);//hypot2(p, 1.0);
+				if (p < 0) {
+					r = -r;
+				}
+				d[l] = e[l] / (p + r);
+				d[l + 1] = e[l] * (p + r);
+				double dl1 = d[l + 1];
+				double h = g - d[l];
+				for (int i = l + 2; i < n; i++) {
+					d[i] -= h;
+				}
+				f = f + h;
+
+				// Implicit QL transformation.
+
+				p = d[m];
+				double c = 1.0;
+				double c2 = c;
+				double c3 = c;
+				double el1 = e[l + 1];
+				double s = 0.0;
+				double s2 = 0.0;
+				for (int i = m - 1; i >= l; i--) {
+					c3 = c2;
+					c2 = c;
+					s2 = s;
+					g = c * e[i];
+					h = c * p;
+					r = sqrt(p*p + e[i] * e[i]);//hypot2(p,e[i]);
+					e[i + 1] = s * r;
+					s = e[i] / r;
+					c = p / r;
+					p = c * d[i] - s * g;
+					d[i + 1] = h + s * (c * g + s * d[i]);
+
+					// Accumulate transformation.
+
+					for (int k = 0; k < n; k++) {
+						h = V[k][i + 1];
+						V[k][i + 1] = s * V[k][i] + c * h;
+						V[k][i] = c * V[k][i] - s * h;
+					}
+				}
+				p = -s * s2 * c3 * el1 * e[l] / dl1;
+				e[l] = s * p;
+				d[l] = c * p;
+
+				// Check for convergence.
+
+			} while (fabs(e[l]) > eps*tst1);
+		}
+		d[l] = d[l] + f;
+		e[l] = 0.0;
+	}
+
+	// Sort eigenvalues and corresponding vectors.
+
+	for (int i = 0; i < n - 1; i++) {
+		int k = i;
+		double p = d[i];
+		for (int j = i + 1; j < n; j++) {
+			if (d[j] < p) {
+				k = j;
+				p = d[j];
+			}
+		}
+		if (k != i) {
+			d[k] = d[i];
+			d[i] = p;
+			for (int j = 0; j < n; j++) {
+				p = V[j][i];
+				V[j][i] = V[j][k];
+				V[j][k] = p;
+			}
+		}
+	}
+}
+
+__device__ void eigen_decomposition(double A[n][n], double V[n][n], double d[n]) {
+	double e[n];
+	for (int i = 0; i < n; i++) {
+		for (int j = 0; j < n; j++) {
+			V[i][j] = A[i][j];
+		}
+	}
+	tred2(V, d, e);
+	tql2(V, d, e);
+}
+
+
 
 //This Kernel finds NN by exploiting the structure of the point cloud
 __global__ void kernelNNStructured
@@ -155,12 +411,12 @@ __global__ void edgeDetect(float *pts, int *indices, int num_regions) {// int *e
 		float this_var = 0;
 		for (int i = 0; i < 4; i++) {
 			for (int j = 0; j < 4; j++) {
-				float n = i * 4 + j + 1;
+				float ind = i * 4 + j + 1;
 				float this_point = pts[(pos + j + i * 512) * 3 + 2];
-				if (n > 1) {
-					this_var = ((n - 2) / (n - 1))*this_var + (1 / n)*(this_point - prev_mean)*(this_point - prev_mean);
+				if (ind > 1) {
+					this_var = ((ind - 2) / (ind - 1))*this_var + (1 / ind)*(this_point - prev_mean)*(this_point - prev_mean);
 				}
-				prev_mean = (this_point + (n - 1)*prev_mean) / n;
+				prev_mean = (this_point + (ind - 1)*prev_mean) / ind;
 			}
 		}//Need to iterate through all points 1 for finding the variance
 		//and 1 for setting if a point is on an edge or not
@@ -211,20 +467,18 @@ __global__ void kernelRmDup
 	}
 }
 
-__device__ void syminverse3x3(float *A) {
-	float A_temp[9];
+__device__ void syminverse3x3(double *A) {
+	double A_temp[9];
 
-	float det = A[0] * (A[4] * A[8] - A[5] * A[5]) -
-		A[1] * (A[1] * A[8] - A[5] * A[6]) +
-		A[2] * (A[1] * A[5] - A[4] * A[6]);
-	float invdet = 1 / det;
+	double det = A[0] * A[4] * A[8] + 2 * A[1] * A[2] * A[5] - A[4] * A[2] * A[2] - A[0] * A[5] * A[5] - A[8] * A[1] * A[1];
+	double invdet = 1 / det;
 
 	A_temp[0] = (A[4] * A[8] - A[5] * A[5])*invdet;
-	A_temp[1] = (A[6] * A[5] - A[1] * A[8])*invdet;
-	A_temp[2] = (A[1] * A[5] - A[6] * A[4])*invdet;
+	A_temp[1] = -(A[1] * A[8] - A[2] * A[5])*invdet;
+	A_temp[2] = (A[1] * A[5] - A[2] * A[4])*invdet;
 	A_temp[3] = A_temp[1];
-	A_temp[4] = (A[0] * A[8] - A[6] * A[6])*invdet;
-	A_temp[5] = (A[1] * A[6] - A[0] * A[5])*invdet;
+	A_temp[4] = (A[0] * A[8] - A[2] * A[2])*invdet;
+	A_temp[5] = -(A[0] * A[5] - A[1] * A[2])*invdet;
 	A_temp[6] = A_temp[2];
 	A_temp[7] = A_temp[5];
 	A_temp[8] = (A[0] * A[4] - A[1] * A[1])*invdet;
@@ -236,7 +490,7 @@ __device__ void syminverse3x3(float *A) {
 }
 
 __global__ void
-kernelNormals(float *pts, float *norms, int radius)
+approxNormals(float *pts, float *norms, int radius)
 {
 	unsigned int idx = threadIdx.x + blockIdx.x*blockDim.x;
 
@@ -244,9 +498,8 @@ kernelNormals(float *pts, float *norms, int radius)
 		if (isfinite(pts[idx * 3])) {
 			int a = idx / 512; //this row
 			int b = idx % 512; //this col
-			bool finite = false;
-			float AtA[9] = { 0,0,0 , 0,0,0, 0,0,0 }; //rowmajor 3x3 matrix
-			float Atd[3] = { 0,0,0 };
+			double AtA[9] = { 0,0,0 , 0,0,0, 0,0,0 }; //rowmajor 3x3 matrix
+			double Atd[3] = { 0,0,0 };
 			float d = sqrt(pts[idx * 3 + 0] * pts[idx * 3 + 0] + pts[idx * 3 + 1] * pts[idx * 3 + 1] + pts[idx * 3 + 2] + pts[idx * 3 + 2]);
 			for (int i = -radius; i <= radius; i++) {
 				for (int j = -radius; j <= radius; j++) {
@@ -263,33 +516,31 @@ kernelNormals(float *pts, float *norms, int radius)
 							Atd[0] += d*pts[this_ind * 3 + 0];
 							Atd[1] += d*pts[this_ind * 3 + 1];
 							Atd[2] += d*pts[this_ind * 3 + 2];
-							finite = true;
 						}
 					}
 				}
 			}
-			if (finite) {
-				AtA[3] = AtA[1];
-				AtA[6] = AtA[2];
-				AtA[7] = AtA[5];
+			AtA[3] = AtA[1];
+			AtA[6] = AtA[2];
+			AtA[7] = AtA[5];
 
-				syminverse3x3(AtA);
+			syminverse3x3(AtA);
 
-				float norm = 0;
-				for (int i = 0; i < 3; i++) {
-					norms[idx * 3 + i] = AtA[i * 3 + 0] * Atd[0] + AtA[i * 3 + 1] * Atd[1] + AtA[i * 3 + 2] * Atd[2];
-					norm += norms[idx * 3 + i] * norms[idx * 3 + i];
-				}
-				//normalize to create unit normal
-				norm = sqrt(norm);
-				for (int i = 0; i < 3; i++) {
-					norms[idx * 3 + i] = norms[idx * 3 + i] / norm;
-				}
+			float norm = 0;
+			for (int i = 0; i < 3; i++) {
+				norms[idx * 3 + i] = AtA[i * 3 + 0] * Atd[0] + AtA[i * 3 + 1] * Atd[1] + AtA[i * 3 + 2] * Atd[2];
+				norm += norms[idx * 3 + i] * norms[idx * 3 + i];
 			}
-			else {
-				for (int i = 0; i < 3; i++) {
-					norms[idx * 3 + i] = 0;
-				}
+			//normalize to create unit normal
+			norm = sqrt(norm);
+			for (int i = 0; i < 3; i++) {
+				norms[idx * 3 + i] = norms[idx * 3 + i] / norm;
+			}
+			//direct normal towards camera viewpoint
+			if ((-norms[idx * 3 + 0] * pts[idx * 3 + 0] - norms[idx * 3 + 1] * pts[idx * 3 + 1] - norms[idx * 3 + 2] * pts[idx * 3 + 2]) >= 0) {
+				norms[idx * 3 + 0] = -norms[idx * 3 + 0];
+				norms[idx * 3 + 1] = -norms[idx * 3 + 1];
+				norms[idx * 3 + 2] = -norms[idx * 3 + 2];
 			}
 		}
 		else {
@@ -301,20 +552,99 @@ kernelNormals(float *pts, float *norms, int radius)
 	}
 }
 
+__global__ void
+exactNormals(float *pts, float *norms, int radius)
+{
+	unsigned int idx = threadIdx.x + blockIdx.x*blockDim.x;
+
+	if (idx < numPoints) {
+		if (isfinite(pts[idx * 3])) {
+			int a = idx / 512; //this row
+			int b = idx % 512; //this col
+			double M[n][n] = { {0,0,0},{ 0,0,0 },{ 0,0,0 } };
+			double V[n][n];
+			double d[n];
+			double mean[n] = { 0,0,0 };
+			int num = 0;
+			//First calculate mean
+			for (int i = -radius; i <= radius; i++) {
+				for (int j = -radius; j <= radius; j++) {
+					if (a + i >= 0 && a + i < 424 && b + j >= 0 && b + j < 512 && (i*i + j*j) <= (radius + 1)*(radius + 1)) { //this check makes sure we are within the limits of the 512x424 matrix and that we do a radius search instead of a square search
+						int this_ind = (a + i) * 512 + b + j;
+						if (isfinite(pts[this_ind * 3])) {
+							mean[0] += pts[this_ind * 3 + 0]; mean[1] += pts[this_ind * 3 + 1]; mean[2] += pts[this_ind * 3 + 2];
+							num++;
+						}
+					}
+				}
+			}
+			mean[0] /= num; mean[1] /= num; mean[2] /= num;
+			//Then calculate covariance matrix
+			for (int i = -radius; i <= radius; i++) {
+				for (int j = -radius; j <= radius; j++) {
+					if (a + i >= 0 && a + i < 424 && b + j >= 0 && b + j < 512 && (i*i + j*j) <= (radius + 1)*(radius + 1)) { //this check makes sure we are within the limits of the 512x424 matrix and that we do a radius search instead of a square search
+						int this_ind = (a + i) * 512 + b + j;
+						if (isfinite(pts[this_ind * 3])) {
+							float a = pts[this_ind * 3 + 0] - mean[0];
+							float b = pts[this_ind * 3 + 1] - mean[1];
+							float c = pts[this_ind * 3 + 2] - mean[2];
+							M[0][0] += a*a; M[0][1] += a*b; M[0][2] += a*c;
+							M[1][0] = M[0][1]; M[1][1] += b*b; M[1][2] += b*c;
+							M[2][0] = M[0][2];  M[2][1] = M[1][2];  M[2][2] += c*c;
+						}
+					}
+				}
+			}
+			for (int i = 0; i < n; i++) {
+				for (int j = 0; j < n; j++) {
+					M[i][j] /= num;
+				}
+			}
+			//Find egenvalues and eigenvectors
+			eigen_decomposition(M, V, d);
+			//The normal is equal to the smallest eigenvalue
+			for (int i = 0; i < 3; i++) {
+				norms[idx * 3 + i] = V[i][0];
+			}
+			//direct normal towards camera viewpoint
+			if ((-norms[idx * 3 + 0] * pts[idx * 3 + 0] - norms[idx * 3 + 1] * pts[idx * 3 + 1] - norms[idx * 3 + 2] * pts[idx * 3 + 2]) >= 0) {
+				norms[idx * 3 + 0] = -norms[idx * 3 + 0];
+				norms[idx * 3 + 1] = -norms[idx * 3 + 1];
+				norms[idx * 3 + 2] = -norms[idx * 3 + 2];
+			}
+		}
+		else {
+			for (int i = 0; i < 3; i++) {
+				norms[idx * 3 + i] = 0;
+			}
+		}
+	}
+}
+
 //Computes the approx normals on the GPU exploiting the structure of the depth image
 void normals_GPU(float *model, float *normals) {
+	cudaEvent_t start, stop;
+	float time;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
 	float *gpu_model, *gpu_normals;
 	dim3 dimBlock(512, 1, 1);
 	dim3 dimGrid(ceil((float)COL / dimBlock.x), 1, 1);
 	PERR(cudaMalloc(&gpu_model, ROW*COL * sizeof(float)));
 	PERR(cudaMalloc(&gpu_normals, ROW*COL * sizeof(float)));
 	PERR(cudaMemcpy(gpu_model, model, ROW*COL * sizeof(float), cudaMemcpyHostToDevice));
-	kernelNormals << <dimGrid, dimBlock >> > (gpu_model, gpu_normals, 3);
+	cudaEventRecord(start); //start timer
+	//approxNormals << <dimGrid, dimBlock >> > (gpu_model, gpu_normals, 5);
+	exactNormals << <dimGrid, dimBlock >> > (gpu_model, gpu_normals, 5);
+	cudaEventRecord(stop); //stop timer
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&time, start, stop);
 	ERRCHECK;
 	PERR(cudaMemcpy(normals, gpu_normals, ROW*COL * sizeof(float), cudaMemcpyDeviceToHost));
 	PERR(cudaFree(gpu_model));
 	PERR(cudaFree(gpu_normals));
 	cudaDeviceSynchronize();
+	printf("norm time: %f\n", time);
 }
 
 
