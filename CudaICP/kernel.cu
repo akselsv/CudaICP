@@ -16,6 +16,8 @@
 #define MAX(a, b) ((a)>(b)?(a):(b))
 #define n 3
 
+#define IDX2C(i,j,ld) (((j)*(ld))+(i))
+
 #define PERR(call) \
   if (call) {\
     fprintf(stderr, "%s:%d Error [%s] on "#call"\n", __FILE__, __LINE__,\
@@ -23,6 +25,7 @@
 	system("pause");\
     exit(1);\
   }
+
 #define ERRCHECK \
   if (cudaPeekAtLastError()) { \
     fprintf(stderr, "%s:%d Error [%s]\n", __FILE__, __LINE__,\
@@ -36,7 +39,7 @@ __device__ const int blockSize = 512;
 int threads = blockSize;
 
 
-
+//Helper-function for eigen_decompositon
 __device__ void tred2(double V[n][n], double d[n], double e[n]) {
 
 	//  This is derived from the Algol procedures tred2 by
@@ -153,8 +156,7 @@ __device__ void tred2(double V[n][n], double d[n], double e[n]) {
 	e[0] = 0.0;
 }
 
-
-
+//Helper function for eigen_decompositon
 __device__ void tql2(double V[n][n], double d[n], double e[n]) {
 	// Symmetric tridiagonal QL algorithm.
 
@@ -274,6 +276,47 @@ __device__ void tql2(double V[n][n], double d[n], double e[n]) {
 	}
 }
 
+//Inverts the symmetric 3x3 matrix A, where A is row-major
+__device__ void syminverse3x3(double *A) {
+	double A_temp[9];
+
+	double det = A[0] * A[4] * A[8] + 2 * A[1] * A[2] * A[5] - A[4] * A[2] * A[2] - A[0] * A[5] * A[5] - A[8] * A[1] * A[1];
+	double invdet = 1 / det;
+
+	A_temp[0] = (A[4] * A[8] - A[5] * A[5])*invdet;
+	A_temp[1] = -(A[1] * A[8] - A[2] * A[5])*invdet;
+	A_temp[2] = (A[1] * A[5] - A[2] * A[4])*invdet;
+	A_temp[3] = A_temp[1];
+	A_temp[4] = (A[0] * A[8] - A[2] * A[2])*invdet;
+	A_temp[5] = -(A[0] * A[5] - A[1] * A[2])*invdet;
+	A_temp[6] = A_temp[2];
+	A_temp[7] = A_temp[5];
+	A_temp[8] = (A[0] * A[4] - A[1] * A[1])*invdet;
+
+
+	for (int i = 0; i < 9; i++) {
+		A[i] = A_temp[i];
+	}
+}
+
+//Calculates transformation matrix from 6dof parameters (roll,pitch,yaw,tx,ty,tz)
+__device__ void pose_from6dof(float *par, float *T) {
+
+	T[0] = cos(par[2])*cos(par[1]);
+	T[1] = -sin(par[2])*cos(par[0]) + cos(par[2])*sin(par[1])*sin(par[0]);
+	T[2] = sin(par[2])*sin(par[0]) + cos(par[2])*sin(par[1])*cos(par[0]);
+	T[3] = par[3];
+	T[4] = sin(par[2])*cos(par[1]);
+	T[5] = cos(par[2])*cos(par[0]) + sin(par[2])*sin(par[1])*sin(par[0]);
+	T[6] = -cos(par[2])*sin(par[0]) + sin(par[2])*sin(par[1])*cos(par[0]);
+	T[7] = par[4];
+	T[8] = -sin(par[1]);
+	T[9] = cos(par[1])*sin(par[0]);
+	T[10] = cos(par[1])*cos(par[0]);
+	T[11] = par[5];
+}
+
+//Finds the egenvalues d and corresponding eigenvectors V for the 3x3 symmetric matrix A
 __device__ void eigen_decomposition(double A[n][n], double V[n][n], double d[n]) {
 	double e[n];
 	for (int i = 0; i < n; i++) {
@@ -285,11 +328,9 @@ __device__ void eigen_decomposition(double A[n][n], double V[n][n], double d[n])
 	tql2(V, d, e);
 }
 
-
-
-//This Kernel finds NN by exploiting the structure of the point cloud
+//This Kernel finds NN between pts1 and pts2 by exploiting the structure of the point cloud
 __global__ void kernelNNStructured
-(float *pts1, float*pts2, float *distances, int *closest, int area) {
+(float *model, float *target, float *distances, int *closest, int area) {
 	// This implementation exploits the matrix structure of a depth image from a 3D camera and perfroms a limited NN search for each point. 
 	// For a query point q with row coordinate a and column coordinate b in matrix pts1, this algorithm searches through the points in the range a-n:a+n b-m:b+n in matrix pts2
 	// This assumes small increments in the movement between the two consecutive depth images pts1 and pts2
@@ -297,19 +338,19 @@ __global__ void kernelNNStructured
 
 	int idx = threadIdx.x + blockIdx.x*blockDim.x;
 
-	float distToClosest = 999999;
-	int closestIndex = -1;
-
 	if (idx < numPoints) {
+		float distToClosest = 999999;
+		int closestIndex = -1;
+
 		int a = idx / 512; //this row
 		int b = idx % 512; //this col
 		for (int i = -area; i <= area; i++) {
 			for (int j = -area; j <= area; j++) {
 				if (a + i >= 0 && a + i < 424 && b + j >= 0 && b + j < 512 && (i*i + j*j) <= (area + 1)*(area + 1)) { //this check makes sure we are within the limits of the 512x424 matrix and that we do a radius search instead of a square search
 					int this_ind = (a + i) * 512 + b + j;
-					float dist = (pts1[idx * 3 + 0] - pts2[this_ind * 3 + 0])*(pts1[idx * 3 + 0] - pts2[this_ind * 3 + 0]) +
-						(pts1[idx * 3 + 1] - pts2[this_ind * 3 + 1])*(pts1[idx * 3 + 1] - pts2[this_ind * 3 + 1]) +
-						(pts1[idx * 3 + 2] - pts2[this_ind * 3 + 2])*(pts1[idx * 3 + 2] - pts2[this_ind * 3 + 2]);
+					float dist = (model[idx * 3 + 0] - target[this_ind * 3 + 0])*(model[idx * 3 + 0] - target[this_ind * 3 + 0]) +
+						(model[idx * 3 + 1] - target[this_ind * 3 + 1])*(model[idx * 3 + 1] - target[this_ind * 3 + 1]) +
+						(model[idx * 3 + 2] - target[this_ind * 3 + 2])*(model[idx * 3 + 2] - target[this_ind * 3 + 2]);
 					if (dist < distToClosest) {
 						distToClosest = dist;
 						closestIndex = this_ind;
@@ -467,28 +508,7 @@ __global__ void kernelRmDup
 	}
 }
 
-__device__ void syminverse3x3(double *A) {
-	double A_temp[9];
-
-	double det = A[0] * A[4] * A[8] + 2 * A[1] * A[2] * A[5] - A[4] * A[2] * A[2] - A[0] * A[5] * A[5] - A[8] * A[1] * A[1];
-	double invdet = 1 / det;
-
-	A_temp[0] = (A[4] * A[8] - A[5] * A[5])*invdet;
-	A_temp[1] = -(A[1] * A[8] - A[2] * A[5])*invdet;
-	A_temp[2] = (A[1] * A[5] - A[2] * A[4])*invdet;
-	A_temp[3] = A_temp[1];
-	A_temp[4] = (A[0] * A[8] - A[2] * A[2])*invdet;
-	A_temp[5] = -(A[0] * A[5] - A[1] * A[2])*invdet;
-	A_temp[6] = A_temp[2];
-	A_temp[7] = A_temp[5];
-	A_temp[8] = (A[0] * A[4] - A[1] * A[1])*invdet;
-
-
-	for (int i = 0; i < 9; i++) {
-		A[i] = A_temp[i];
-	}
-}
-
+//Computes the approx normals for by using Ax=b and setting all values of b equal to the distance from origin to the point
 __global__ void
 approxNormals(float *pts, float *norms, int radius)
 {
@@ -552,6 +572,7 @@ approxNormals(float *pts, float *norms, int radius)
 	}
 }
 
+//Computes the exact normals by using the eigenvectors for the covariance-matrix
 __global__ void
 exactNormals(float *pts, float *norms, int radius)
 {
@@ -621,7 +642,68 @@ exactNormals(float *pts, float *norms, int radius)
 	}
 }
 
-//Computes the approx normals on the GPU exploiting the structure of the depth image
+//This kernerl sets up the Point to Plane ICP problem on the form Ax=b
+__global__ void setupPointToPlane(float *model, float *target, float *normals, int *closest, float *A, float *b) {
+
+	int idx = threadIdx.x + blockIdx.x*blockDim.x;
+
+	if (idx < numPoints) {
+		if (closest[idx] != -1) {
+			b[idx] = normals[closest[idx] * 3 + 0] * target[closest[idx] * 3 + 0] + normals[closest[idx] * 3 + 1] * target[closest[idx] * 3 + 1] + normals[closest[idx] * 3 + 2] * target[closest[idx] * 3 + 2]
+				- normals[closest[idx] * 3 + 0] * model[idx * 3 + 0] - normals[closest[idx] * 3 + 1] * model[idx * 3 + 1] - normals[closest[idx] * 3 + 2] * model[idx * 3 + 2];
+
+			//row major
+			/*A[idx * 6 + 0] = normals[closest[idx] * 3 + 2] * model[idx * 3 + 1] - normals[closest[idx] * 3 + 1] * model[idx * 3 + 2];
+			A[idx * 6 + 1] = normals[closest[idx] * 3 + 0] * model[idx * 3 + 2] - normals[closest[idx] * 3 + 2] * model[idx * 3 + 0];
+			A[idx * 6 + 2] = normals[closest[idx] * 3 + 1] * model[idx * 3 + 0] - normals[closest[idx] * 3 + 0] * model[idx * 3 + 1];
+			A[idx * 6 + 3] = normals[closest[idx] * 3 + 0];
+			A[idx * 6 + 4] = normals[closest[idx] * 3 + 1];
+			A[idx * 6 + 5] = normals[closest[idx] * 3 + 2];*/
+
+			//column major for cublas library
+			A[IDX2C(idx, 0, COL)] = normals[closest[idx] * 3 + 2] * model[idx * 3 + 1] - normals[closest[idx] * 3 + 1] * model[idx * 3 + 2];
+			A[IDX2C(idx, 1, COL)] = normals[closest[idx] * 3 + 0] * model[idx * 3 + 2] - normals[closest[idx] * 3 + 2] * model[idx * 3 + 0];
+			A[IDX2C(idx, 2, COL)] = normals[closest[idx] * 3 + 1] * model[idx * 3 + 0] - normals[closest[idx] * 3 + 0] * model[idx * 3 + 1];
+			A[IDX2C(idx, 3, COL)] = normals[closest[idx] * 3 + 0];
+			A[IDX2C(idx, 4, COL)] = normals[closest[idx] * 3 + 1];
+			A[IDX2C(idx, 5, COL)] = normals[closest[idx] * 3 + 2];
+		}
+		else {
+			b[idx] = 0;
+			/*A[idx * 6 + 0] = 0;
+			A[idx * 6 + 1] = 0;
+			A[idx * 6 + 2] = 0;
+			A[idx * 6 + 3] = 0;
+			A[idx * 6 + 4] = 0;
+			A[idx * 6 + 5] = 0;*/
+			A[IDX2C(idx, 0, COL)] = 0;
+			A[IDX2C(idx, 1, COL)] = 0;
+			A[IDX2C(idx, 2, COL)] = 0;
+			A[IDX2C(idx, 3, COL)] = 0;
+			A[IDX2C(idx, 4, COL)] = 0;
+			A[IDX2C(idx, 5, COL)] = 0;
+		}
+	}
+}
+
+//This kernel transform the point cloud "pts" using 6dof par [roll,pitch,yaw,t1,t2,t3]
+__global__ void transformCloud(float *pts, float *par) {
+
+	int idx = threadIdx.x + blockIdx.x*blockDim.x;
+
+	if (idx < numPoints) {
+		if (isfinite(pts[idx * 3])) {
+			float T[12];
+			pose_from6dof(par, T);
+			float temp[3] = { pts[idx * 3 + 0],pts[idx * 3 + 1],pts[idx * 3 + 2] };
+			pts[idx * 3 + 0] = T[0] * temp[0] + T[1] * temp[1] + T[2] * temp[2] + T[3];
+			pts[idx * 3 + 1] = T[4] * temp[0] + T[5] * temp[1] + T[6] * temp[2] + T[7];
+			pts[idx * 3 + 2] = T[8] * temp[0] + T[9] * temp[1] + T[10] * temp[2] + T[11];
+		}
+	}
+}
+
+//Computes the normals on the GPU by exploiting the structure of the depth image
 void normals_GPU(float *model, float *normals) {
 	cudaEvent_t start, stop;
 	float time;
@@ -647,10 +729,8 @@ void normals_GPU(float *model, float *normals) {
 	printf("norm time: %f\n", time);
 }
 
-
 //Runs kernels after memory is allocated
-float run_kernel
-(float *d_model, float *d_target, float* d_distances, int *d_closest, int *d_modelEdges, int *d_targetEdges)
+float run_kernel(float *d_model, float *d_target, float* d_distances, int *d_closest, int *d_modelEdges, int *d_targetEdges)
 {
 	cudaEvent_t start, stop;
 	float time;
@@ -717,4 +797,114 @@ float NN_GPU(float *model, float *target, int *closest) {
 	cudaDeviceReset();
 
 	return executiontime;
+}
+
+float PTP_GPU(float *model, float *target) {
+	float *gpuptr_model, *gpuptr_target, *gpuptr_dist, *gpuptr_normals, *gpuptr_A, *gpuptr_AtA, *gpuptr_b, *gpuptr_Atb,*gpuptr_T;
+	int *gpuptr_closest;
+	int *gpuptr_modelEdges; //COL 1 if edge, 0 if not
+	int *gpuptr_targetEdges; //COL 1 if edge, 0 if not
+
+	float **aAtA;
+	int* dLUPivots;
+	int* dLUInfo;
+	float *a, *be;
+	a = (float*)malloc(sizeof(gpuptr_model));
+	be = (float*)malloc(sizeof(gpuptr_model));
+	*a = 1.0;
+	*be = 0.0;
+
+	cublasHandle_t handle;
+	cublasStatus_t status = cublasCreate_v2(&handle);
+	
+	cudaEvent_t start, stop;
+	float time;
+	cudaEventCreate(&start);
+	cudaEventCreate(&stop);
+
+	dim3 dimBlock(16, 1, 1); //threads per block
+	dim3 dimGrid(ceil((float)COL / dimBlock.x)); //number of blocks
+
+	PERR(cudaMalloc(&aAtA, sizeof(float*)));
+	PERR(cudaMalloc(&dLUPivots, 6 * sizeof(int)));
+	PERR(cudaMalloc(&dLUInfo, sizeof(int)));
+
+	PERR(cudaMalloc(&gpuptr_model, ROW*COL * sizeof(float)));
+	PERR(cudaMalloc(&gpuptr_modelEdges, COL * sizeof(int)));
+	PERR(cudaMalloc(&gpuptr_target, ROW*COL * sizeof(float)));
+	PERR(cudaMalloc(&gpuptr_targetEdges, COL * sizeof(int)));
+	PERR(cudaMalloc(&gpuptr_dist, COL * sizeof(float)));
+	PERR(cudaMalloc(&gpuptr_normals, ROW*COL * sizeof(float)));
+	PERR(cudaMalloc(&gpuptr_closest, COL * sizeof(int)));
+	PERR(cudaMalloc(&gpuptr_A, 2*ROW*COL * sizeof(float)));
+	PERR(cudaMalloc(&gpuptr_T, 11 * sizeof(float)));
+	PERR(cudaMalloc(&gpuptr_AtA, 36 * sizeof(float)));
+	PERR(cudaMalloc(&gpuptr_Atb, 6 * sizeof(float)));
+	PERR(cudaMalloc(&gpuptr_b, COL * sizeof(float)));
+
+	PERR(cudaMemcpy(gpuptr_model, model, ROW*COL * sizeof(float), cudaMemcpyHostToDevice));
+	cudaEventRecord(start); //start timer
+	PERR(cudaMemcpy(gpuptr_target, target, ROW*COL * sizeof(float), cudaMemcpyHostToDevice));
+
+	edgeDetect << <dimGrid, dimBlock >> > (gpuptr_model, gpuptr_modelEdges, 13568);
+	ERRCHECK;
+	edgeDetect << <dimGrid, dimBlock >> > (gpuptr_target, gpuptr_targetEdges, 13568);
+	ERRCHECK;
+
+	dimBlock.x = blockSize;
+	dimGrid.x = ceil((float)COL / dimBlock.x);
+
+	kernelNNStructured << <dimGrid, dimBlock >> > (gpuptr_model, gpuptr_target, gpuptr_dist, gpuptr_closest, 7);
+	ERRCHECK;
+	rmEdgesFromCorr << <dimGrid, dimBlock >> > (gpuptr_closest, gpuptr_modelEdges, gpuptr_targetEdges);
+	ERRCHECK;
+	exactNormals << <dimGrid, dimBlock >> > (gpuptr_target, gpuptr_normals, 5);
+	ERRCHECK;
+
+	setupPointToPlane << <dimGrid, dimBlock >> > (gpuptr_model, gpuptr_target, gpuptr_normals, gpuptr_closest, gpuptr_A, gpuptr_b);
+	ERRCHECK;
+
+	//Find A^T*A
+	status = cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, 6, 6, COL, a, gpuptr_A, COL, gpuptr_A, COL, be, gpuptr_AtA, 6);
+	//And A^T*b
+	status = cublasSgemv(handle, CUBLAS_OP_T, COL, 6, a, gpuptr_A, COL, gpuptr_b, 1, be, gpuptr_Atb, 1);
+	
+	//Then invert to find (A^T*A)^-1
+	PERR(cudaMemcpy(aAtA, &gpuptr_AtA, sizeof(float*), cudaMemcpyHostToDevice));
+	status = cublasSgetrfBatched(handle, 6, aAtA, 6, dLUPivots, dLUInfo, 1);
+	status = cublasSgetriBatched(handle, 6, (const float **)aAtA, 6, dLUPivots, aAtA, 6, dLUInfo, 1);
+	//Now gpuptr_AtA is inverted!!
+
+	//Finally find the solution (A^t*A)^-1*A^T*b (the solution is stored in gpuptr_Atb)
+	status = cublasSgemv(handle, CUBLAS_OP_N, 6, 6, a, gpuptr_AtA, 6, gpuptr_Atb, 1, be, gpuptr_Atb, 1);
+
+	//Transform the model cloud according to point-to-plane solution
+	transformCloud << <dimGrid, dimBlock >> > (gpuptr_model, gpuptr_Atb);
+	ERRCHECK;
+
+	cudaDeviceSynchronize();
+	cudaEventRecord(stop); //stop timer
+	cudaEventSynchronize(stop);
+	cudaEventElapsedTime(&time, start, stop);
+
+	cublasDestroy_v2(handle);
+	free(a);
+	free(be);
+	PERR(cudaFree(gpuptr_T));
+	PERR(cudaFree(gpuptr_Atb));
+	PERR(cudaFree(gpuptr_AtA));
+	PERR(cudaFree(gpuptr_A));
+	PERR(cudaFree(gpuptr_b));
+	PERR(cudaFree(gpuptr_normals));
+	PERR(cudaFree(gpuptr_model));
+	PERR(cudaFree(gpuptr_modelEdges));
+	PERR(cudaFree(gpuptr_target));
+	PERR(cudaFree(gpuptr_targetEdges));
+	PERR(cudaFree(gpuptr_dist));
+	PERR(cudaFree(gpuptr_closest));
+
+	cudaDeviceSynchronize();
+	cudaDeviceReset();
+
+	return time;
 }

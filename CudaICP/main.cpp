@@ -19,9 +19,9 @@ Eigen::Matrix3f rot_from_RPY(Eigen::Vector3f rpy); //Calculate rotation matric f
 Eigen::Vector3f RPY_from_rot(Eigen::Matrix3f rot); //Calculate roll-pitch-yaw angles from rotation matrix
 
 int main() {
-	int icp_iteratons = 30; //Number of ICP iterations
+	int icp_iteratons = 0; //Number of ICP iterations
 	int dataset_start = 0; //Dataset start number. Format: "name" + number + ".txt"
-	int dataset_stop = 49; //Dataset stop number. Format: "name" + number + ".txt"
+	int dataset_stop = 1; //Dataset stop number. Format: "name" + number + ".txt"
 
 
 	long startTime;
@@ -73,11 +73,12 @@ int main() {
 		}
 
 		//Compute normals
-		startTime = clock();
 		normals_GPU(target, normals); //Approx normals on the GPU
 		//comp_normal(target,normals); //On the CPU using EIGEN
-		endTime = clock();
-		printf("Normal computation took: %ld ms \n", endTime - startTime);
+
+		float extime = PTP_GPU(model, target);
+		printf("Point to plane on GPU took: %f ms\n", extime);
+
 
 		//iterate ICP several times
 		for (int q = 0; q < icp_iteratons; q++) {
@@ -116,8 +117,6 @@ int main() {
 			//Write Performance to file
 			outfile << RPY_from_rot(accuICPTrans.block<3, 3>(0, 0)).transpose() << " " << accuICPTrans.block<3, 1>(0, 3).transpose() << " " << corr << " " << rms_err << " " << executiontime << "\n";
 		}
-		writeFile(model, 6);
-
 		//update transformation and write to file
 		absTrans = accuICPTrans*absTrans;
 		transfile << absTrans << "\n";

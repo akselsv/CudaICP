@@ -96,6 +96,8 @@ Eigen::Matrix4f icpPTPCPU(float *cld1, float *cld2, float *normals, int *index) 
 	Eigen::Vector3f n;
 	Eigen::VectorXf dum = Eigen::VectorXf::Zero(6);
 
+
+	
 	int it = 0;
 	for (int i = 0; i < COL; i++) {
 		if (index[i] != -1) {
@@ -109,8 +111,7 @@ Eigen::Matrix4f icpPTPCPU(float *cld1, float *cld2, float *normals, int *index) 
 			b(3) += n(0)*(p - q).dot(n); b(4) += n(1)*(p - q).dot(n); b(5) += n(2)*(p - q).dot(n);
 		}
 	}
-	//Eigen::JacobiSVD<Eigen::MatrixXf> USV(A, Eigen::ComputeFullU | Eigen::ComputeFullV);
-	//std::cout << USV.matrixV*USV.singularValues().asDiagonal().inverse()*USV.matrixU().transpose()*b << std::endl;
+	std::cout << "Eigen x: \n" << A.jacobiSvd(Eigen::ComputeFullU | Eigen::ComputeFullV).solve(-b) << std::endl;
 	return pose_from_6dof(A.jacobiSvd(Eigen::ComputeFullU | Eigen::ComputeFullV).solve(-b));
 }
 
