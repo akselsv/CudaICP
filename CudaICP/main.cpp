@@ -24,8 +24,8 @@ int main() {
 	int dataset_stop = 1; //Dataset stop number. Format: "name" + number + ".txt"
 
 
-	long startTime;
-	long endTime;
+	std::clock_t startTime;
+	std::clock_t endTime;
 	float *model = new float[ROW*COL];
 	float *target = new float[ROW*COL];
 	float *normals = new float[ROW*COL];
@@ -52,8 +52,10 @@ int main() {
 
 		//Read new model data
 		name = "Cloud_uncompressed" + std::to_string(i) + ".txt";
+		startTime = std::clock();
 		readFile(model, name); //Read file to "model"
-
+		endTime = std::clock();
+		std::cout << "readtime: " << (endTime-startTime)/(double) CLOCKS_PER_SEC << std::endl;
 		//Store data in Eigen matrix
 		for (int j = 0; j < COL; j++) {
 			Temp(0, j) = model[j * 3 + 0];
@@ -73,10 +75,10 @@ int main() {
 		}
 
 		//Compute normals
-		normals_GPU(target, normals); //Approx normals on the GPU
+		//normals_GPU(target, normals); //Exact normals on the GPU
 		//comp_normal(target,normals); //On the CPU using EIGEN
 
-		float extime = PTP_GPU(model, target);
+		float extime = PTP_GPU();
 		printf("Point to plane on GPU took: %f ms\n", extime);
 
 
@@ -119,7 +121,8 @@ int main() {
 		}
 		//update transformation and write to file
 		absTrans = accuICPTrans*absTrans;
-		transfile << absTrans << "\n";
+		transfile << accuICPTrans << "\n";
+		//transfile << absTrans << "\n";
 
 		//reset interframe transfomration
 		accuICPTrans = Eigen::Matrix4f::Identity();

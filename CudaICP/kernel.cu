@@ -4,7 +4,12 @@
 #include <cstdlib>
 #include <limits>
 #include <ctime>
+
 #include <iostream>
+#include <fstream>
+#include <sstream>
+
+#include <thread>
 
 #include <cublas_v2.h>
 
@@ -37,7 +42,6 @@
 __device__ const int numPoints = 217088;
 __device__ const int blockSize = 512;
 int threads = blockSize;
-
 
 //Helper-function for eigen_decompositon
 __device__ void tred2(double V[n][n], double d[n], double e[n]) {
@@ -300,7 +304,7 @@ __device__ void syminverse3x3(double *A) {
 }
 
 //Calculates transformation matrix from 6dof parameters (roll,pitch,yaw,tx,ty,tz)
-__device__ void pose_from6dof(float *par, float *T) {
+__host__ __device__ void pose_from6dof(float *par, float *T) {
 
 	T[0] = cos(par[2])*cos(par[1]);
 	T[1] = -sin(par[2])*cos(par[0]) + cos(par[2])*sin(par[1])*sin(par[0]);
@@ -703,6 +707,45 @@ __global__ void transformCloud(float *pts, float *par) {
 	}
 }
 
+void getDataFromFile(float *data, std::string name) {
+	std::fstream in;
+	in.open(name);
+	if (in.fail()) {
+		printf("error loading .txt file reading\n");
+		return;
+	}
+	std::string line;
+	std::string value;
+	int i = 0;
+	while (std::getline(in, line)) {
+		std::stringstream ss(line);
+		while (ss >> value) {
+			if (value == "-inf") {
+				data[i] = -std::numeric_limits<float>::infinity();
+			}
+			else {
+				data[i] = std::stof(value);
+			}
+			i++;
+		}
+	}
+	in.close();
+}
+
+void updateAccumulatedTransformation(float *par, float *T) {
+	float ti[12];
+	pose_from6dof(par, ti);
+	float temp[12];
+	for (int i = 0; i < 12; i++) {
+		temp[i] = T[i];
+	}
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 4; j++) {
+			T[i * 4 + j] = ti[i * 4] * temp[j] + ti[i * 4 + 1] * temp[4+j] + ti[i * 4 + 2] * temp[8+j] + (float)(((int)j / 3)*ti[i * 4 + 3]);
+		}
+	}
+}
+
 //Computes the normals on the GPU by exploiting the structure of the depth image
 void normals_GPU(float *model, float *normals) {
 	cudaEvent_t start, stop;
@@ -799,7 +842,7 @@ float NN_GPU(float *model, float *target, int *closest) {
 	return executiontime;
 }
 
-float PTP_GPU(float *model, float *target) {
+float PTP_GPU() {
 	float *gpuptr_model, *gpuptr_target, *gpuptr_dist, *gpuptr_normals, *gpuptr_A, *gpuptr_AtA, *gpuptr_b, *gpuptr_Atb,*gpuptr_T;
 	int *gpuptr_closest;
 	int *gpuptr_modelEdges; //COL 1 if edge, 0 if not
@@ -813,6 +856,13 @@ float PTP_GPU(float *model, float *target) {
 	be = (float*)malloc(sizeof(gpuptr_model));
 	*a = 1.0;
 	*be = 0.0;
+
+	float *h_par = new float[6];
+	float *target = new float[ROW*COL];
+	int icp_iterations = 20;
+	int datasets = 100;
+	std::clock_t startTime;
+	std::clock_t endTime;
 
 	cublasHandle_t handle;
 	cublasStatus_t status = cublasCreate_v2(&handle);
@@ -842,54 +892,92 @@ float PTP_GPU(float *model, float *target) {
 	PERR(cudaMalloc(&gpuptr_Atb, 6 * sizeof(float)));
 	PERR(cudaMalloc(&gpuptr_b, COL * sizeof(float)));
 
-	PERR(cudaMemcpy(gpuptr_model, model, ROW*COL * sizeof(float), cudaMemcpyHostToDevice));
-	cudaEventRecord(start); //start timer
+	std::string name = "Cloud_uncompressed0.txt";
+	std::thread t1(getDataFromFile, target, name);
+	t1.join();
+	PERR(cudaMemcpy(gpuptr_model, target, ROW*COL * sizeof(float), cudaMemcpyHostToDevice));
+	cudaDeviceSynchronize();
+	name = "Cloud_uncompressed1.txt";
+	std::thread t2(getDataFromFile, target, name);
+	t2.join();
 	PERR(cudaMemcpy(gpuptr_target, target, ROW*COL * sizeof(float), cudaMemcpyHostToDevice));
 
-	edgeDetect << <dimGrid, dimBlock >> > (gpuptr_model, gpuptr_modelEdges, 13568);
-	ERRCHECK;
-	edgeDetect << <dimGrid, dimBlock >> > (gpuptr_target, gpuptr_targetEdges, 13568);
-	ERRCHECK;
 
-	dimBlock.x = blockSize;
-	dimGrid.x = ceil((float)COL / dimBlock.x);
+	//Loop over data-sets here
+	///////////////////////////////////////////////////////////
+	cudaEventRecord(start); //start timer
+	for (int cld_num = 2; cld_num < datasets; cld_num++) {
+		//get new target for next iteration
+		name = "Cloud_uncompressed" + std::to_string(cld_num) + ".txt";
+		std::thread t3(getDataFromFile, target, name);
 
-	kernelNNStructured << <dimGrid, dimBlock >> > (gpuptr_model, gpuptr_target, gpuptr_dist, gpuptr_closest, 7);
-	ERRCHECK;
-	rmEdgesFromCorr << <dimGrid, dimBlock >> > (gpuptr_closest, gpuptr_modelEdges, gpuptr_targetEdges);
-	ERRCHECK;
-	exactNormals << <dimGrid, dimBlock >> > (gpuptr_target, gpuptr_normals, 5);
-	ERRCHECK;
+		//These operations are only done once for the data-set
+		/////////////////////////////////////////////
+		edgeDetect << <dimGrid, dimBlock >> > (gpuptr_model, gpuptr_modelEdges, 13568);
+		ERRCHECK;
+		edgeDetect << <dimGrid, dimBlock >> > (gpuptr_target, gpuptr_targetEdges, 13568);
+		ERRCHECK;
 
-	setupPointToPlane << <dimGrid, dimBlock >> > (gpuptr_model, gpuptr_target, gpuptr_normals, gpuptr_closest, gpuptr_A, gpuptr_b);
-	ERRCHECK;
+		dimBlock.x = blockSize;
+		dimGrid.x = ceil((float)COL / dimBlock.x);
 
-	//Find A^T*A
-	status = cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, 6, 6, COL, a, gpuptr_A, COL, gpuptr_A, COL, be, gpuptr_AtA, 6);
-	//And A^T*b
-	status = cublasSgemv(handle, CUBLAS_OP_T, COL, 6, a, gpuptr_A, COL, gpuptr_b, 1, be, gpuptr_Atb, 1);
-	
-	//Then invert to find (A^T*A)^-1
-	PERR(cudaMemcpy(aAtA, &gpuptr_AtA, sizeof(float*), cudaMemcpyHostToDevice));
-	status = cublasSgetrfBatched(handle, 6, aAtA, 6, dLUPivots, dLUInfo, 1);
-	status = cublasSgetriBatched(handle, 6, (const float **)aAtA, 6, dLUPivots, aAtA, 6, dLUInfo, 1);
-	//Now gpuptr_AtA is inverted!!
+		exactNormals << <dimGrid, dimBlock >> > (gpuptr_target, gpuptr_normals, 5);
+		ERRCHECK;
+		float T[12] = { 1,0,0,0,0,1,0,0 ,0,0,1,0 };
+		//Loop ICP here untill convergence
+		/////////////////////////////////////////////
+		for (int it = 0; it < icp_iterations; it++)
+		{
+			kernelNNStructured << <dimGrid, dimBlock >> > (gpuptr_model, gpuptr_target, gpuptr_dist, gpuptr_closest, 7);
+			ERRCHECK;
+			rmEdgesFromCorr << <dimGrid, dimBlock >> > (gpuptr_closest, gpuptr_modelEdges, gpuptr_targetEdges);
+			ERRCHECK;
+			setupPointToPlane << <dimGrid, dimBlock >> > (gpuptr_model, gpuptr_target, gpuptr_normals, gpuptr_closest, gpuptr_A, gpuptr_b);
+			ERRCHECK;
+			//Find A^T*A
+			status = cublasSgemm(handle, CUBLAS_OP_T, CUBLAS_OP_N, 6, 6, COL, a, gpuptr_A, COL, gpuptr_A, COL, be, gpuptr_AtA, 6);
+			//And A^T*b
+			status = cublasSgemv(handle, CUBLAS_OP_T, COL, 6, a, gpuptr_A, COL, gpuptr_b, 1, be, gpuptr_Atb, 1);
+			cudaDeviceSynchronize();
+			//Then invert to find (A^T*A)^-1
+			PERR(cudaMemcpy(aAtA, &gpuptr_AtA, sizeof(float*), cudaMemcpyHostToDevice));
+			status = cublasSgetrfBatched(handle, 6, aAtA, 6, dLUPivots, dLUInfo, 1);
+			status = cublasSgetriBatched(handle, 6, (const float **)aAtA, 6, dLUPivots, aAtA, 6, dLUInfo, 1);
+			cudaDeviceSynchronize();
+			//Now gpuptr_AtA is inverted!!
+			//Finally find the solution (A^t*A)^-1*A^T*b (the solution is stored in gpuptr_Atb)
+			status = cublasSgemv(handle, CUBLAS_OP_N, 6, 6, a, gpuptr_AtA, 6, gpuptr_Atb, 1, be, gpuptr_Atb, 1);
+			cudaDeviceSynchronize();
+			//Transform the model cloud according to point-to-plane solution
+			transformCloud << <dimGrid, dimBlock >> > (gpuptr_model, gpuptr_Atb);
+			cudaDeviceSynchronize();
+			ERRCHECK;
+			PERR(cudaMemcpy(h_par, gpuptr_Atb, 6 * sizeof(float), cudaMemcpyDeviceToHost));
+			updateAccumulatedTransformation(h_par, T);
+		}
+		/////////////////////////////////////////////
+		//Model becomes target
+		float *temp = gpuptr_target;
+		gpuptr_target = gpuptr_model;
+		gpuptr_model = temp;
+		//update target on gpu
+		//startTime = std::clock();
+		t3.join();
+		//endTime = std::clock();
+		//std::cout << "Wating for file to load took: " << (endTime - startTime) / (double)CLOCKS_PER_SEC << std::endl;
+		PERR(cudaMemcpy(gpuptr_target, target, ROW*COL * sizeof(float), cudaMemcpyHostToDevice));
+		cudaDeviceSynchronize();
+	}
+	///////////////////////////////////////////////////////////
 
-	//Finally find the solution (A^t*A)^-1*A^T*b (the solution is stored in gpuptr_Atb)
-	status = cublasSgemv(handle, CUBLAS_OP_N, 6, 6, a, gpuptr_AtA, 6, gpuptr_Atb, 1, be, gpuptr_Atb, 1);
-
-	//Transform the model cloud according to point-to-plane solution
-	transformCloud << <dimGrid, dimBlock >> > (gpuptr_model, gpuptr_Atb);
-	ERRCHECK;
-
-	cudaDeviceSynchronize();
 	cudaEventRecord(stop); //stop timer
 	cudaEventSynchronize(stop);
 	cudaEventElapsedTime(&time, start, stop);
-
 	cublasDestroy_v2(handle);
 	free(a);
 	free(be);
+	delete[] h_par; h_par = nullptr;
+	delete[] target; target = nullptr;
 	PERR(cudaFree(gpuptr_T));
 	PERR(cudaFree(gpuptr_Atb));
 	PERR(cudaFree(gpuptr_AtA));
@@ -906,5 +994,5 @@ float PTP_GPU(float *model, float *target) {
 	cudaDeviceSynchronize();
 	cudaDeviceReset();
 
-	return time;
+	return time/(datasets-2);
 }
